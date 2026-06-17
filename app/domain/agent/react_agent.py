@@ -1,19 +1,36 @@
-"""ReAct Agent — Think → Act → Observe loop.
+"""ReAct Agent — powered by LangGraph StateGraph.
 
-Minimal implementation: LLM decides when to call tools and when to give
-a final answer. Uses OpenAI function-calling protocol for tool dispatch.
+State machine:
+    ┌─────────┐   has action?    ┌───────┐
+    │  agent  │ ──── YES ──────→ │ tools │
+    │ (think) │                  │(exec) │
+    └────┬────┘                  └───┬───┘
+         │ NO                        │
+         ▼                           │
+       END  ◄────────────────────────┘
+                (back to agent)
+
+Uses our own LLMClient interface — no langchain-openai dependency.
 """
 
 import json
 import time
+from typing import TypedDict
+
+from langgraph.graph import END, StateGraph
 
 from app.core.logger.logger import get_logger
-from app.domain.agent.agent import AgentResult, AgentRole, AgentStep, BaseAgent
+from app.domain.agent.agent import AgentResult, AgentStep
 from app.domain.llm.llm_client import LLMClient, LLMMessage
-from app.domain.tool.base import ToolResult
 from app.domain.tool.registry import ToolRegistry
 
 logger = get_logger(__name__)
+
+MAX_ITERATIONS = 8
+
+# ---------------------------------------------------------------------------
+# System prompt
+# ---------------------------------------------------------------------------
 
 _SYSTEM_PROMPT = """\
 You are a helpful AI assistant. You have access to the following tools:
@@ -37,8 +54,6 @@ Rules:
 - If you don't need a tool, go directly to Final Answer.
 - Be concise and helpful."""
 
-MAX_ITERATIONS = 8
-
 
 def _build_tool_descriptions(registry: ToolRegistry) -> str:
     """Format tool metadata for the system prompt."""
@@ -49,14 +64,232 @@ def _build_tool_descriptions(registry: ToolRegistry) -> str:
         param_str = ", ".join(
             f"{k}: {v.get('type', 'any')}" for k, v in props.items()
         )
-        lines.append(f"- **{tool_meta['name']}**({param_str}): {tool_meta['description']}")
+        lines.append(
+            f"- **{tool_meta['name']}**({param_str}): {tool_meta['description']}"
+        )
     return "\n".join(lines) if lines else "(no tools available)"
 
 
-class ReActAgent(BaseAgent):
-    """Agent that reasons using Think → Act → Observe loop."""
+# ---------------------------------------------------------------------------
+# Graph State
+# ---------------------------------------------------------------------------
 
-    role = AgentRole.EDGE  # default; caller can override
+class AgentState(TypedDict):
+    """State that flows through the LangGraph state machine."""
+
+    messages: list[LLMMessage]
+    steps: list[AgentStep]
+    answer: str | None
+    done: bool
+    iteration: int
+    max_iterations: int
+
+
+# ---------------------------------------------------------------------------
+# Output parser
+# ---------------------------------------------------------------------------
+
+def _parse_llm_output(
+    text: str,
+) -> tuple[str, str | None, dict | None, str | None]:
+    """Parse ReAct-formatted LLM output.
+
+    Returns:
+        (thought, action, action_input, final_answer)
+    """
+    thought = ""
+    action = None
+    action_input = None
+    final_answer = None
+
+    for line in text.strip().split("\n"):
+        stripped = line.strip()
+        if stripped.startswith("Thought:"):
+            thought = stripped[len("Thought:"):].strip()
+        elif stripped.startswith("Action:"):
+            action = stripped[len("Action:"):].strip()
+        elif stripped.startswith("Action Input:"):
+            raw = stripped[len("Action Input:"):].strip()
+            try:
+                action_input = json.loads(raw)
+            except json.JSONDecodeError:
+                action_input = {"query": raw}
+        elif stripped.startswith("Final Answer:"):
+            final_answer = stripped[len("Final Answer:"):].strip()
+
+    return thought, action, action_input, final_answer
+
+
+# ---------------------------------------------------------------------------
+# Node functions
+# ---------------------------------------------------------------------------
+
+def _make_agent_node(llm: LLMClient):
+    """Create the 'agent' node — calls LLM and parses the response."""
+
+    async def agent_node(state: AgentState) -> dict:
+        messages = state["messages"]
+        iteration = state["iteration"]
+
+        logger.info("langgraph_agent_think", iteration=iteration + 1)
+        response = await llm.invoke(messages)
+        raw_text = response.content
+
+        thought, action, action_input, final_answer = _parse_llm_output(raw_text)
+
+        if final_answer is not None:
+            step = AgentStep(
+                thought=thought,
+                action="respond",
+                action_input={},
+                observation=final_answer,
+            )
+            return {
+                "steps": state["steps"] + [step],
+                "answer": final_answer,
+                "done": True,
+                "iteration": iteration + 1,
+            }
+
+        if action:
+            step = AgentStep(
+                thought=thought,
+                action=action,
+                action_input=action_input or {},
+            )
+            # Append LLM output + placeholder for observation
+            return {
+                "messages": messages
+                + [
+                    LLMMessage(role="assistant", content=raw_text),
+                    LLMMessage(role="user", content="__PENDING_OBSERVATION__"),
+                ],
+                "steps": state["steps"] + [step],
+                "done": False,
+                "iteration": iteration + 1,
+            }
+
+        # No recognizable action or final answer — treat as final
+        step = AgentStep(
+            thought=thought,
+            action="respond",
+            action_input={},
+            observation=raw_text,
+        )
+        return {
+            "steps": state["steps"] + [step],
+            "answer": raw_text,
+            "done": True,
+            "iteration": iteration + 1,
+        }
+
+    return agent_node
+
+
+def _make_tools_node(registry: ToolRegistry):
+    """Create the 'tools' node — executes the last action."""
+
+    async def tools_node(state: AgentState) -> dict:
+        steps = state["steps"]
+        last_step = steps[-1]
+
+        logger.info(
+            "langgraph_tool_exec",
+            tool=last_step.action,
+            args=list(last_step.action_input.keys()),
+        )
+        result = await registry.execute(
+            last_step.action, **last_step.action_input
+        )
+        observation = result.output if result.success else f"Error: {result.error}"
+
+        # Update the last step with observation
+        updated_step = AgentStep(
+            thought=last_step.thought,
+            action=last_step.action,
+            action_input=last_step.action_input,
+            observation=observation,
+        )
+        updated_steps = steps[:-1] + [updated_step]
+
+        # Replace the pending observation message with actual observation
+        messages = state["messages"]
+        if messages and messages[-1].content == "__PENDING_OBSERVATION__":
+            messages = messages[:-1]
+        messages = messages + [
+            LLMMessage(
+                role="user",
+                content=f"Observation: {observation}\n\nContinue reasoning or give your Final Answer.",
+            )
+        ]
+
+        return {
+            "messages": messages,
+            "steps": updated_steps,
+        }
+
+    return tools_node
+
+
+# ---------------------------------------------------------------------------
+# Conditional edge
+# ---------------------------------------------------------------------------
+
+def _should_continue(state: AgentState) -> str:
+    """Route to 'tools' if there's an action, or END if done."""
+    if state["done"]:
+        return "end"
+    if state["iteration"] >= state.get("max_iterations", MAX_ITERATIONS):
+        return "end"
+    return "tools"
+
+
+# ---------------------------------------------------------------------------
+# Graph builder
+# ---------------------------------------------------------------------------
+
+def build_react_graph(
+    llm: LLMClient,
+    registry: ToolRegistry,
+) -> StateGraph:
+    """Build and compile the ReAct LangGraph state machine.
+
+    Returns a compiled graph ready for invocation.
+    """
+    graph = StateGraph(AgentState)
+
+    # Add nodes
+    graph.add_node("agent", _make_agent_node(llm))
+    graph.add_node("tools", _make_tools_node(registry))
+
+    # Entry point
+    graph.set_entry_point("agent")
+
+    # Conditional edges from agent
+    graph.add_conditional_edges(
+        "agent",
+        _should_continue,
+        {
+            "tools": "tools",
+            "end": END,
+        },
+    )
+
+    # Tools always go back to agent
+    graph.add_edge("tools", "agent")
+
+    return graph.compile()
+
+
+# ---------------------------------------------------------------------------
+# Public API — same interface as before
+# ---------------------------------------------------------------------------
+
+class ReActAgent:
+    """LangGraph-powered ReAct agent.
+
+    Same interface as before — `run(query)` returns `AgentResult`.
+    """
 
     def __init__(
         self,
@@ -67,136 +300,47 @@ class ReActAgent(BaseAgent):
         self._llm = llm_client
         self._tools = tool_registry
         self._max_iterations = max_iterations
+        self._graph = build_react_graph(llm_client, tool_registry)
 
     async def run(self, query: str, context: dict | None = None) -> AgentResult:
-        """Execute the ReAct loop until a Final Answer is produced."""
+        """Execute the ReAct loop via LangGraph."""
         start_time = time.monotonic()
-        steps: list[AgentStep] = []
 
         system_prompt = _SYSTEM_PROMPT.format(
             tool_descriptions=_build_tool_descriptions(self._tools)
         )
-        messages = [
-            LLMMessage(role="system", content=system_prompt),
-            LLMMessage(role="user", content=query),
-        ]
 
-        for i in range(self._max_iterations):
-            logger.info("react_iteration", step=i + 1, query=query[:50])
-            response = await self._llm.invoke(messages)
-            raw_text = response.content
+        initial_state: AgentState = {
+            "messages": [
+                LLMMessage(role="system", content=system_prompt),
+                LLMMessage(role="user", content=query),
+            ],
+            "steps": [],
+            "answer": None,
+            "done": False,
+            "iteration": 0,
+            "max_iterations": self._max_iterations,
+        }
 
-            # Parse the response
-            thought, action, action_input, final_answer = _parse_llm_output(raw_text)
+        logger.info("langgraph_agent_start", query=query[:80])
 
-            if final_answer is not None:
-                # Agent decided it's done
-                steps.append(
-                    AgentStep(
-                        thought=thought,
-                        action="respond",
-                        action_input={},
-                        observation=final_answer,
-                    )
-                )
-                elapsed_ms = (time.monotonic() - start_time) * 1000
-                return AgentResult(
-                    answer=final_answer,
-                    steps=steps,
-                    total_tokens=_total_tokens(steps),
-                    latency_ms=round(elapsed_ms, 1),
-                )
+        # Run the graph
+        final_state = await self._graph.ainvoke(initial_state)
 
-            if action:
-                # Execute the tool
-                tool_result: ToolResult = await self._tools.execute(
-                    action, **(action_input or {})
-                )
-                observation = tool_result.output if tool_result.success else f"Error: {tool_result.error}"
-
-                steps.append(
-                    AgentStep(
-                        thought=thought,
-                        action=action,
-                        action_input=action_input or {},
-                        observation=observation,
-                    )
-                )
-
-                # Feed observation back to LLM
-                messages.append(LLMMessage(role="assistant", content=raw_text))
-                messages.append(
-                    LLMMessage(
-                        role="user",
-                        content=f"Observation: {observation}\n\nContinue reasoning or give your Final Answer.",
-                    )
-                )
-            else:
-                # LLM didn't produce a recognizable action or final answer
-                # Treat the whole response as the final answer
-                steps.append(
-                    AgentStep(
-                        thought=thought,
-                        action="respond",
-                        action_input={},
-                        observation=raw_text,
-                    )
-                )
-                elapsed_ms = (time.monotonic() - start_time) * 1000
-                return AgentResult(
-                    answer=raw_text,
-                    steps=steps,
-                    total_tokens=_total_tokens(steps),
-                    latency_ms=round(elapsed_ms, 1),
-                )
-
-        # Max iterations reached — return what we have
         elapsed_ms = (time.monotonic() - start_time) * 1000
-        last_answer = steps[-1].observation if steps else "I couldn't complete the task."
-        return AgentResult(
-            answer=last_answer,
-            steps=steps,
-            total_tokens=_total_tokens(steps),
+
+        answer = final_state.get("answer") or "I couldn't complete the task."
+        steps = final_state.get("steps", [])
+
+        logger.info(
+            "langgraph_agent_done",
+            steps=len(steps),
             latency_ms=round(elapsed_ms, 1),
         )
 
-
-# ---------------------------------------------------------------------------
-# Output parser
-# ---------------------------------------------------------------------------
-
-def _parse_llm_output(text: str) -> tuple[str, str | None, dict | None, str | None]:
-    """Parse ReAct-formatted LLM output.
-
-    Returns:
-        (thought, action, action_input, final_answer)
-        - If final_answer is set, the agent is done.
-        - If action is set, the agent wants to call a tool.
-    """
-    thought = ""
-    action = None
-    action_input = None
-    final_answer = None
-
-    lines = text.strip().split("\n")
-    for line in lines:
-        stripped = line.strip()
-        if stripped.startswith("Thought:"):
-            thought = stripped[len("Thought:"):].strip()
-        elif stripped.startswith("Action:"):
-            action = stripped[len("Action:"):].strip()
-        elif stripped.startswith("Action Input:"):
-            raw_input = stripped[len("Action Input:"):].strip()
-            try:
-                action_input = json.loads(raw_input)
-            except json.JSONDecodeError:
-                action_input = {"query": raw_input}
-        elif stripped.startswith("Final Answer:"):
-            final_answer = stripped[len("Final Answer:"):].strip()
-
-    return thought, action, action_input, final_answer
-
-
-def _total_tokens(steps: list[AgentStep]) -> int:
-    """Placeholder for token counting."""
-    return 0
+        return AgentResult(
+            answer=answer,
+            steps=steps,
+            total_tokens=0,
+            latency_ms=round(elapsed_ms, 1),
+        )
