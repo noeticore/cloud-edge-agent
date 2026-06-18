@@ -13,10 +13,19 @@ from app.domain.rag.rag import Embedder
 
 logger = get_logger(__name__)
 
+# Map string distance names to Qdrant Distance enum
+_DISTANCE_MAP = {
+    "cosine": Distance.COSINE,
+    "euclid": Distance.EUCLID,
+    "dot": Distance.DOT,
+    "manhattan": Distance.MANHATTAN,
+}
+
 
 class QdrantMemoryStore(MemoryStore):
     """Long-term memory backed by Qdrant vector database.
 
+    Supports both local and cloud Qdrant instances.
     Requires an Embedder to compute vectors for add/search operations.
     """
 
@@ -26,30 +35,52 @@ class QdrantMemoryStore(MemoryStore):
         self,
         embedder: Embedder,
         settings: VectorStoreSettings,
-        vector_size: int = 1536,
     ) -> None:
         self._embedder = embedder
-        self._host = settings.host
-        self._port = settings.port
-        self._collection = settings.collection_name
-        self._vector_size = vector_size
+        self._url = settings.url
+        self._api_key = settings.api_key or None
+        self._collection = settings.collection
+        self._vector_size = settings.vector_size
+        self._timeout = settings.timeout
         self._client: AsyncQdrantClient | None = None
 
     async def _ensure_client(self) -> AsyncQdrantClient:
         """Lazily create the Qdrant client."""
         if self._client is None:
-            self._client = AsyncQdrantClient(host=self._host, port=self._port)
-            # Create collection if it doesn't exist
-            collections = await self._client.get_collections()
-            names = [c.name for c in collections.collections]
-            if self._collection not in names:
-                await self._client.create_collection(
-                    collection_name=self._collection,
-                    vectors_config=VectorParams(
-                        size=self._vector_size, distance=Distance.COSINE
-                    ),
+            # Connect to Qdrant (supports both local and cloud)
+            if self._api_key:
+                # Cloud Qdrant with API key
+                self._client = AsyncQdrantClient(
+                    url=self._url,
+                    api_key=self._api_key,
+                    timeout=self._timeout,
                 )
-                logger.info("qdrant_collection_created", collection=self._collection)
+                logger.info("qdrant_cloud_connected", url=self._url)
+            else:
+                # Local Qdrant
+                self._client = AsyncQdrantClient(
+                    url=self._url,
+                    timeout=self._timeout,
+                )
+                logger.info("qdrant_local_connected", url=self._url)
+
+            # Create collection if it doesn't exist
+            try:
+                collections = await self._client.get_collections()
+                names = [c.name for c in collections.collections]
+                if self._collection not in names:
+                    await self._client.create_collection(
+                        collection_name=self._collection,
+                        vectors_config=VectorParams(
+                            size=self._vector_size, distance=Distance.COSINE
+                        ),
+                    )
+                    logger.info("qdrant_collection_created", collection=self._collection)
+                else:
+                    logger.info("qdrant_collection_exists", collection=self._collection)
+            except Exception as exc:
+                logger.warning("qdrant_collection_check_failed", error=str(exc))
+                # Don't fail — collection might already exist or be created later
         return self._client
 
     async def add(self, entry: MemoryEntry) -> str:
@@ -102,12 +133,26 @@ class QdrantMemoryStore(MemoryStore):
         client = await self._ensure_client()
         vector = await self._embedder.embed(query)
         try:
-            results = await client.search(
-                collection_name=self._collection,
-                query_vector=vector,
-                limit=top_k,
-                with_payload=True,
-            )
+            # Use query_points (newer API) with fallback to search
+            if hasattr(client, "query_points"):
+                # qdrant-client >= 1.18.0
+                from qdrant_client.models import QueryRequest
+
+                results = await client.query_points(
+                    collection_name=self._collection,
+                    query=vector,
+                    limit=top_k,
+                    with_payload=True,
+                )
+                hits = results.points
+            else:
+                # Older qdrant-client versions
+                hits = await client.search(
+                    collection_name=self._collection,
+                    query_vector=vector,
+                    limit=top_k,
+                    with_payload=True,
+                )
             return [
                 MemoryEntry(
                     content=hit.payload.get("content", ""),
@@ -116,7 +161,7 @@ class QdrantMemoryStore(MemoryStore):
                     entry_id=str(hit.id),
                     score=hit.score,
                 )
-                for hit in results
+                for hit in hits
             ]
         except Exception as exc:
             raise MemoryException(f"Failed to search memories: {exc}") from exc

@@ -4,30 +4,74 @@ This module creates singleton instances of all services and provides
 them as FastAPI dependencies. Uses lifespan events for initialization.
 """
 
+import structlog
 from dataclasses import dataclass
 
 from app.core.config.settings import Settings, get_settings
+from app.domain.agent.agent import AgentRole
+from app.domain.agent.react_agent import ReActAgent
 from app.domain.memory.memory import MemoryStore
-from app.domain.privacy.privacy import PrivacyBudgetTracker
+from app.domain.tool.registry import ToolRegistry
 from app.infrastructure.cache.cache import InMemoryCache
 from app.infrastructure.database.session_repository import (
     InMemorySessionStore,
     InMemoryShortTermStore,
 )
+from app.infrastructure.database.sqlite_store import SQLiteMemoryStore
 from app.infrastructure.llm.client_factory import (
     create_cloud_llm_client,
     create_edge_llm_client,
 )
 from app.infrastructure.llm.openai_compatible_client import OpenAICompatibleClient
-from app.infrastructure.rag.llm_embedder import LLMEmbedder
+from app.infrastructure.rag.chunker import FixedSizeChunker
+from app.infrastructure.rag.pipeline import RAGPipeline
+from app.infrastructure.rag.reranker import LLMReranker
+from app.infrastructure.rag.retriever import MemoryRetriever
 from app.infrastructure.vectorstore.qdrant_store import QdrantMemoryStore
 from app.services.agent_orchestrator import CollaborativeOrchestrator
 from app.services.chat_service import ChatService
 from app.services.privacy_engine import (
-    EpsilonBudgetTracker,
     RegexSanitizer,
     ThreeLayerPrivacyDetector,
 )
+from tools.calculator_tool import CalculatorTool
+from tools.search_tool import SearchTool
+from tools.time_tool import TimeTool
+
+logger = structlog.get_logger(__name__)
+
+
+def _check_edge_available(settings: Settings) -> bool:
+    """Check if edge LLM (Ollama) is available."""
+    import httpx
+
+    try:
+        base_url = settings.edge_llm.base_url
+        # Try to hit the Ollama API
+        resp = httpx.get(base_url.replace("/v1", "/api/tags"), timeout=3.0)
+        return resp.status_code == 200
+    except Exception:
+        return False
+
+
+def _check_qdrant_available(settings: Settings) -> bool:
+    """Check if Qdrant is available (local or cloud)."""
+    import httpx
+
+    try:
+        url = settings.vector_store.url
+        api_key = settings.vector_store.api_key
+
+        # For cloud Qdrant, just check if URL is configured
+        if api_key and url.startswith("https://"):
+            logger.info("qdrant_cloud_configured", url=url)
+            return True
+
+        # For local Qdrant, try health check
+        resp = httpx.get(f"{url}/healthz", timeout=3.0)
+        return resp.status_code == 200
+    except Exception:
+        return False
 
 
 @dataclass
@@ -37,8 +81,8 @@ class AppComponents:
     settings: Settings
     chat_service: ChatService
     session_store: InMemorySessionStore
-    budget_tracker: PrivacyBudgetTracker
     cache: InMemoryCache
+    rag_pipeline: RAGPipeline | None = None
 
 
 def _create_long_term_memory(
@@ -46,29 +90,73 @@ def _create_long_term_memory(
 ) -> MemoryStore | None:
     """Create Qdrant-backed long-term memory if vector store is configured.
 
-    Returns None if Qdrant is not available (graceful degradation).
+    Uses MiniLM for local embeddings (384 dimensions, no API key required).
+    Returns None if initialization fails (graceful degradation).
     """
     try:
-        # Use edge LLM for embeddings (Ollama embedding models)
-        embedder_client = OpenAICompatibleClient(
-            provider=settings.edge_llm.provider,
-            model_name=settings.edge_llm.model_name,
-            base_url=settings.edge_llm.base_url,
-            api_key=settings.edge_llm.api_key,
-            temperature=0.0,
-            max_tokens=256,
-        )
-        embedder = LLMEmbedder(embedder_client)
+        from app.infrastructure.rag.minilm_embedder import MiniLMEmbedder
+
+        # Use local MiniLM model for embeddings (runs offline, no API calls)
+        embedder = MiniLMEmbedder()
         store = QdrantMemoryStore(
             embedder=embedder,
             settings=settings.vector_store,
         )
         return store
     except Exception as exc:
-        import structlog
-
-        logger = structlog.get_logger(__name__)
         logger.warning("long_term_memory_init_failed", error=str(exc))
+        return None
+
+
+def _create_tool_registry() -> ToolRegistry:
+    """Create a tool registry with all available tools."""
+    registry = ToolRegistry()
+    registry.register(CalculatorTool())
+    registry.register(TimeTool())
+    registry.register(SearchTool())
+    return registry
+
+
+def _create_rag_pipeline(
+    settings: Settings,
+    vector_store: MemoryStore | None,
+) -> RAGPipeline | None:
+    """Create RAG pipeline if vector store is available.
+
+    Returns None if vector store is not configured (graceful degradation).
+    """
+    if vector_store is None:
+        logger.warning("rag_pipeline_skipped", reason="no vector store")
+        return None
+
+    try:
+        # Chunker
+        chunker = FixedSizeChunker(chunk_size=512, overlap=64)
+
+        # Retriever (wraps the vector store)
+        retriever = MemoryRetriever(store=vector_store)
+
+        # Reranker (uses cloud LLM for better quality)
+        reranker_client = OpenAICompatibleClient(
+            provider=settings.cloud_llm.provider,
+            model_name=settings.cloud_llm.model_name,
+            base_url=settings.cloud_llm.base_url,
+            api_key=settings.cloud_llm.api_key,
+            temperature=0.0,
+            max_tokens=256,
+        )
+        reranker = LLMReranker(llm_client=reranker_client)
+
+        pipeline = RAGPipeline(
+            chunker=chunker,
+            vector_store=vector_store,
+            retriever=retriever,
+            reranker=reranker,
+        )
+        logger.info("rag_pipeline_created")
+        return pipeline
+    except Exception as exc:
+        logger.warning("rag_pipeline_init_failed", error=str(exc))
         return None
 
 
@@ -76,56 +164,107 @@ def create_components() -> AppComponents:
     """Factory that wires up all application components.
 
     Called once during app startup (lifespan).
+    Gracefully degrades when edge services (Ollama, Qdrant) are unavailable.
     """
     settings = get_settings()
 
-    # LLM clients
-    edge_client = create_edge_llm_client(settings.edge_llm)
-    cloud_client = create_cloud_llm_client(settings.cloud_llm)
+    # Check service availability
+    edge_available = _check_edge_available(settings)
+    qdrant_available = _check_qdrant_available(settings)
 
-    # Privacy engine
-    # For SLM judge, we use the edge client itself (same Ollama, smaller model)
-    slm_client = OpenAICompatibleClient(
-        provider="ollama",
-        model_name=settings.privacy.slm_model,
-        base_url=settings.edge_llm.base_url,
-        api_key=settings.edge_llm.api_key,
-        temperature=0.1,
-        max_tokens=256,
+    logger.info(
+        "service_availability",
+        edge_ollama=edge_available,
+        qdrant=qdrant_available,
     )
+
+    # LLM clients — use cloud as fallback if edge is unavailable
+    cloud_client = create_cloud_llm_client(settings.cloud_llm)
+    if edge_available:
+        edge_client = create_edge_llm_client(settings.edge_llm)
+        logger.info("using_edge_llm", model=settings.edge_llm.model_name)
+    else:
+        edge_client = cloud_client
+        logger.warning(
+            "edge_unavailable_using_cloud",
+            fallback=settings.cloud_llm.model_name,
+        )
+
+    # Tools
+    tool_registry = _create_tool_registry()
+
+    # Agents (ReAct with tools)
+    edge_agent = ReActAgent(
+        llm_client=edge_client,
+        tool_registry=tool_registry,
+        role=AgentRole.EDGE,
+    )
+    cloud_agent = ReActAgent(
+        llm_client=cloud_client,
+        tool_registry=tool_registry,
+        role=AgentRole.CLOUD,
+    )
+
+    # Privacy engine — use cloud LLM for SLM judge if edge is unavailable
+    if edge_available:
+        slm_client = OpenAICompatibleClient(
+            provider="ollama",
+            model_name=settings.privacy.slm_model,
+            base_url=settings.edge_llm.base_url,
+            api_key=settings.edge_llm.api_key,
+            temperature=0.1,
+            max_tokens=256,
+        )
+    else:
+        slm_client = cloud_client
+        logger.warning("slm_using_cloud_fallback")
+
     privacy_detector = ThreeLayerPrivacyDetector(slm_client=slm_client)
     sanitizer = RegexSanitizer()
-    budget_tracker = EpsilonBudgetTracker(default_epsilon=settings.privacy.default_epsilon)
 
     # Memory & session
     session_store = InMemorySessionStore()
     short_term_memory = InMemoryShortTermStore()
-    long_term_memory = _create_long_term_memory(settings)
     cache = InMemoryCache()
 
-    # Orchestrator
+    # Cloud memory (Qdrant) for S1 conversations — only if available
+    cloud_memory = None
+    rag_pipeline = None
+    if qdrant_available:
+        cloud_memory = _create_long_term_memory(settings)
+        rag_pipeline = _create_rag_pipeline(settings, cloud_memory)
+        logger.info("cloud_memory_enabled")
+    else:
+        logger.warning("qdrant_unavailable_cloud_memory_disabled")
+
+    # Local memory (SQLite) for S2/S3 conversations — always available
+    local_memory = SQLiteMemoryStore(db_path="data/local_memory.db")
+    logger.info("local_memory_enabled", path="data/local_memory.db")
+
+    # Orchestrator (with agents for tool-calling support)
     orchestrator = CollaborativeOrchestrator(
-        settings=settings,
         edge_client=edge_client,
         cloud_client=cloud_client,
+        edge_agent=edge_agent,
+        cloud_agent=cloud_agent,
         privacy_detector=privacy_detector,
         sanitizer=sanitizer,
-        budget_tracker=budget_tracker,
     )
 
-    # Chat service
+    # Chat service with privacy-aware storage routing
     chat_service = ChatService(
         orchestrator=orchestrator,
         session_store=session_store,
         short_term_memory=short_term_memory,
-        budget_tracker=budget_tracker,
-        long_term_memory=long_term_memory,
+        cloud_memory=cloud_memory,   # S1 → Qdrant
+        local_memory=local_memory,   # S2/S3 → SQLite
+        rag_pipeline=rag_pipeline,
     )
 
     return AppComponents(
         settings=settings,
         chat_service=chat_service,
         session_store=session_store,
-        budget_tracker=budget_tracker,
         cache=cache,
+        rag_pipeline=rag_pipeline,
     )

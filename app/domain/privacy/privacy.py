@@ -1,4 +1,4 @@
-"""Privacy engine abstractions — detection, sanitization, budget tracking."""
+"""Privacy engine abstractions — detection and sanitization."""
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
@@ -67,23 +67,4 @@ class Sanitizer(ABC):
     @abstractmethod
     async def restore(self, sanitized_text: str, mapping: dict[str, str]) -> str:
         """Restore original values from placeholder mapping."""
-        ...
-
-
-class PrivacyBudgetTracker(ABC):
-    """Track cumulative privacy budget (ε) for a session."""
-
-    @abstractmethod
-    def get_remaining(self, session_id: str) -> float:
-        """Return remaining privacy budget ε for the session."""
-        ...
-
-    @abstractmethod
-    def consume(self, session_id: str, cost: float) -> float:
-        """Consume budget and return remaining ε."""
-        ...
-
-    @abstractmethod
-    def is_exhausted(self, session_id: str) -> bool:
-        """True if the session has no remaining budget."""
         ...

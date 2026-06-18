@@ -1,12 +1,14 @@
 """Chat API router."""
 
+import json
+
 from fastapi import APIRouter, HTTPException, Request
+from fastapi.responses import StreamingResponse
 
 from app.api.schemas.chat import (
     ChatRequest,
     ChatResponseSchema,
     ErrorResponse,
-    PrivacyBudgetResponse,
 )
 from app.core.exceptions.exceptions import BaseAppException
 
@@ -38,7 +40,6 @@ async def chat(request: Request, body: ChatRequest) -> ChatResponseSchema:
             privacy_level=result.privacy_level,
             complexity=result.complexity,
             latency_ms=result.latency_ms,
-            budget_remaining=result.budget_remaining,
         )
     except BaseAppException as exc:
         raise HTTPException(status_code=400, detail=exc.message) from exc
@@ -46,16 +47,39 @@ async def chat(request: Request, body: ChatRequest) -> ChatResponseSchema:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
-@router.get(
-    "/budget/{session_id}",
-    response_model=PrivacyBudgetResponse,
-)
-async def get_budget(request: Request, session_id: str) -> PrivacyBudgetResponse:
-    """Get the remaining privacy budget for a session."""
-    budget_tracker = request.app.state.components.budget_tracker
-    remaining = budget_tracker.get_remaining(session_id)
-    return PrivacyBudgetResponse(
-        session_id=session_id,
-        remaining_epsilon=remaining,
-        exhausted=budget_tracker.is_exhausted(session_id),
+@router.post("/stream")
+async def chat_stream(request: Request, body: ChatRequest):
+    """Stream response tokens via Server-Sent Events (SSE).
+
+    Runs the full orchestrator pipeline (privacy detection, routing, agent
+    execution) and streams the final answer token by token.
+
+    Event types:
+    - metadata: session info, mode, privacy level, etc.
+    - token: individual text chunks
+    - done: signals completion
+    """
+    chat_service = request.app.state.components.chat_service
+
+    async def event_generator():
+        try:
+            async for chunk in chat_service.chat_stream(
+                query=body.query, session_id=body.session_id
+            ):
+                yield f"data: {chunk}\n\n"
+        except BaseAppException as exc:
+            error_data = json.dumps({"type": "error", "error": exc.message})
+            yield f"data: {error_data}\n\n"
+        except Exception as exc:
+            error_data = json.dumps({"type": "error", "error": str(exc)})
+            yield f"data: {error_data}\n\n"
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
     )

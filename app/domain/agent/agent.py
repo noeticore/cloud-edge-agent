@@ -1,8 +1,14 @@
 """ReAct Agent abstraction — Think → Act → Observe → Reflect loop."""
 
+from __future__ import annotations
+
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from enum import Enum
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from app.domain.tool.registry import ToolRegistry
 
 
 class AgentRole(str, Enum):
@@ -39,6 +45,12 @@ class BaseAgent(ABC):
     """
 
     role: AgentRole
+
+    @property
+    @abstractmethod
+    def tool_registry(self) -> ToolRegistry | None:
+        """Return the tool registry used by this agent, if any."""
+        ...
 
     @abstractmethod
     async def run(self, query: str, context: dict | None = None) -> AgentResult:

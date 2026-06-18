@@ -3,6 +3,9 @@
 Usage:
     1. Copy configs/.env.example to .env and fill in CLOUD_LLM_API_KEY
     2. python scripts/cli.py
+
+This CLI reuses the same ChatService as the Web API, ensuring consistent
+behavior across both interfaces (privacy detection, tool routing, memory).
 """
 
 import asyncio
@@ -14,38 +17,25 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from dotenv import load_dotenv
 
-from app.core.config.settings import get_settings
+from app.api.dependencies.deps import create_components
 from app.core.logger.logger import get_logger, setup_logging
-from app.domain.agent.react_agent import ReActAgent
-from app.domain.memory.memory import MemoryEntry
-from app.domain.tool.registry import ToolRegistry
-from app.infrastructure.database.session_repository import InMemoryShortTermStore
-from app.infrastructure.llm.client_factory import create_cloud_llm_client
-from tools.calculator_tool import CalculatorTool
-from tools.search_tool import SearchTool
-from tools.time_tool import TimeTool
 
 logger = get_logger("cli")
-
-# Maximum past messages to inject as context
-_MAX_MEMORY_MESSAGES = 6
 
 # ── Banner ──────────────────────────────────────────────────────────────
 BANNER = r"""
   ╔═══════════════════════════════════════════════════╗
-  ║   CloudEdgeAgent — Minimal Prototype (CLI)       ║
-  ║   Powered by DeepSeek API                        ║
+  ║   CloudEdgeAgent — CLI Interface                  ║
+  ║   Privacy-First Cloud-Edge Collaborative Agent    ║
   ╚═══════════════════════════════════════════════════╝
 
   Type your message and press Enter.
   Type 'quit' or 'exit' to leave.
-  Type 'trace' to toggle step-by-step reasoning display.
-  Type 'memory' to inspect stored memory.
 """
 
 
 async def main() -> None:
-    """Interactive chat loop."""
+    """Interactive chat loop using ChatService."""
     # Load .env from project root
     env_path = Path(__file__).resolve().parent.parent / ".env"
     if env_path.exists():
@@ -56,35 +46,24 @@ async def main() -> None:
         print("  Copy configs/.env.example to .env and fill in CLOUD_LLM_API_KEY")
         return
 
-    settings = get_settings()
-    setup_logging(settings.log_level)
+    # Create all components (same as Web API)
+    print("  Initializing components...")
+    components = create_components()
+    setup_logging(components.settings.log_level)
 
-    # Validate API key
-    if not settings.cloud_llm.api_key or settings.cloud_llm.api_key == "":
-        print("  ✗ CLOUD_LLM_API_KEY is empty. Please set it in .env")
-        return
-
-    # Create LLM client
-    llm_client = create_cloud_llm_client(settings.cloud_llm)
-    print(f"  ✓ LLM: {settings.cloud_llm.provider} / {settings.cloud_llm.model_name}")
-
-    # Register tools
-    registry = ToolRegistry()
-    registry.register(CalculatorTool())
-    registry.register(TimeTool())
-    registry.register(SearchTool())
-    print(f"  ✓ Tools: {', '.join(t['name'] for t in registry.list_tools())}")
-
-    # Create agent and memory
-    agent = ReActAgent(llm_client=llm_client, tool_registry=registry)
-    memory = InMemoryShortTermStore()
+    chat_service = components.chat_service
     session_id = "cli-session"
-    print(f"  ✓ Agent ready (max {agent._max_iterations} iterations)")
-    print(f"  ✓ Memory enabled (short-term, session={session_id})")
+
+    print(f"  ✓ Edge LLM: {components.settings.edge_llm.provider} / {components.settings.edge_llm.model_name}")
+    print(f"  ✓ Cloud LLM: {components.settings.cloud_llm.provider} / {components.settings.cloud_llm.model_name}")
+    print(f"  ✓ Session: {session_id}")
+
+    if components.rag_pipeline:
+        print("  ✓ RAG pipeline: enabled")
+    else:
+        print("  ⚠ RAG pipeline: disabled (no vector store)")
 
     print(BANNER)
-
-    show_trace = False
 
     while True:
         try:
@@ -98,63 +77,25 @@ async def main() -> None:
         if user_input.lower() in ("quit", "exit", "q"):
             print("  Bye!")
             break
-        if user_input.lower() == "trace":
-            show_trace = not show_trace
-            print(f"  Trace mode: {'ON' if show_trace else 'OFF'}")
-            continue
-        if user_input.lower() == "memory":
-            entries = await memory.get_recent(limit=20)
-            print(f"  ── Memory ({len(entries)} entries) ──────────────")
-            for e in entries:
-                role = e.metadata.get("role", "?")
-                preview = e.content[:100].replace("\n", " ")
-                print(f"  [{role}] {preview}")
-            print("  ───────────────────────────────────────────")
-            continue
 
-        # Build context from memory
-        context_entries = await memory.search(user_input, top_k=_MAX_MEMORY_MESSAGES)
-        context_text = ""
-        if context_entries:
-            lines = []
-            for entry in context_entries:
-                role = entry.metadata.get("role", "?")
-                lines.append(f"[{role}] {entry.content}")
-            context_text = "Relevant conversation history:\n" + "\n".join(lines) + "\n\n"
-
-        query_with_context = context_text + "Current question: " + user_input
-
-        # Run agent
+        # Run through ChatService (same as Web API)
         print("  Thinking...")
-        result = await agent.run(query_with_context)
+        try:
+            result = await chat_service.chat(
+                query=user_input, session_id=session_id
+            )
 
-        # Store in memory
-        await memory.add(MemoryEntry(
-            content=user_input,
-            session_id=session_id,
-            metadata={"role": "user"},
-        ))
-        await memory.add(MemoryEntry(
-            content=result.answer,
-            session_id=session_id,
-            metadata={"role": "assistant"},
-        ))
+            # Show answer
+            print(f"  Agent: {result.answer}")
+            print(
+                f"  [{result.latency_ms}ms | mode={result.mode} | "
+                f"privacy={result.privacy_level} | complexity=L{result.complexity}]"
+            )
+            print()
 
-        # Show trace if enabled
-        if show_trace and result.steps:
-            print("  ── Trace ─────────────────────────────────")
-            for _i, step in enumerate(result.steps):
-                if step.thought:
-                    print(f"  💭 Thought: {step.thought}")
-                if step.action and step.action != "respond":
-                    print(f"  🔧 Action:  {step.action}({step.action_input})")
-                    print(f"  👁 Observe: {step.observation[:200]}")
-            print("  ───────────────────────────────────────────")
-
-        # Show answer
-        print(f"  Agent: {result.answer}")
-        print(f"  [{result.latency_ms}ms, {len(result.steps)} steps]")
-        print()
+        except Exception as exc:
+            print(f"  Error: {exc}")
+            print()
 
 
 if __name__ == "__main__":

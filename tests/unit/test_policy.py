@@ -35,8 +35,3 @@ class TestRouteMatrix:
         result = route(PrivacyLevel.S3, ComplexityLevel.L5)
         assert result.decision == RouteDecision.SKETCH_REFINE
         assert result.mode == CollaborateMode.SKETCH_REFINE
-
-    def test_budget_exhausted_forces_edge(self) -> None:
-        result = route(PrivacyLevel.S1, ComplexityLevel.L5, budget_exhausted=True)
-        assert result.decision == RouteDecision.EDGE
-        assert result.mode == CollaborateMode.DIRECT_LOCAL

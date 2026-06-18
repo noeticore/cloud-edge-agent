@@ -75,21 +75,8 @@ _DECISION_TO_MODE = {
 def route(
     privacy_level: PrivacyLevel,
     complexity: ComplexityLevel,
-    budget_exhausted: bool = False,
 ) -> RoutingResult:
-    """Apply the routing matrix and return a decision.
-
-    When the privacy budget is exhausted, force everything to edge.
-    """
-    if budget_exhausted:
-        return RoutingResult(
-            decision=RouteDecision.EDGE,
-            mode=CollaborateMode.DIRECT_LOCAL,
-            privacy_level=privacy_level,
-            complexity=complexity,
-            reason="Privacy budget exhausted — forcing local execution",
-        )
-
+    """Apply the routing matrix and return a decision."""
     complexity_group = "low" if complexity.value <= 2 else "high"
     decision = ROUTE_MATRIX.get(
         (privacy_level, complexity_group), RouteDecision.EDGE

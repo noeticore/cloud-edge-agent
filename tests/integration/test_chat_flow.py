@@ -2,6 +2,7 @@
 
 import pytest
 
+from app.domain.agent.agent import AgentRole, AgentResult, BaseAgent
 from app.domain.agent.react_agent import ReActAgent
 from app.domain.llm.llm_client import LLMClient, LLMMessage, LLMResponse, TokenUsage
 from app.domain.memory.memory import MemoryEntry
@@ -13,7 +14,6 @@ from app.infrastructure.database.session_repository import (
 from app.services.agent_orchestrator import CollaborativeOrchestrator
 from app.services.chat_service import ChatService
 from app.services.privacy_engine import (
-    EpsilonBudgetTracker,
     RegexSanitizer,
     ThreeLayerPrivacyDetector,
 )
@@ -51,6 +51,29 @@ class FakeLLMClient(LLMClient):
         return [0.1, 0.2, 0.3]
 
 
+class FakeAgent(BaseAgent):
+    """Fake agent that wraps FakeLLMClient for integration testing."""
+
+    def __init__(self, llm_client: FakeLLMClient, role: AgentRole = AgentRole.EDGE) -> None:
+        self.role = role
+        self._llm = llm_client
+        self._registry = ToolRegistry()
+
+    @property
+    def tool_registry(self) -> ToolRegistry:
+        return self._registry
+
+    async def run(self, query: str, context: dict | None = None) -> AgentResult:
+        """Simulate agent execution by calling LLM directly."""
+        messages = [LLMMessage(role="user", content=query)]
+        response = await self._llm.invoke(messages)
+        return AgentResult(
+            answer=response.content,
+            steps=[],
+            total_tokens=response.usage.total_tokens if response.usage else 0,
+        )
+
+
 # ── Helpers ──────────────────────────────────────────────────────────────
 
 
@@ -61,44 +84,32 @@ def _make_chat_service(
     edge_client = FakeLLMClient(llm_responses)
     cloud_client = FakeLLMClient(llm_responses)
 
+    edge_agent = FakeAgent(edge_client, role=AgentRole.EDGE)
+    cloud_agent = FakeAgent(cloud_client, role=AgentRole.CLOUD)
+
     privacy_detector = ThreeLayerPrivacyDetector(slm_client=edge_client)
     sanitizer = RegexSanitizer()
-    budget_tracker = EpsilonBudgetTracker(default_epsilon=8.0)
 
     session_store = InMemorySessionStore()
     short_term_memory = InMemoryShortTermStore()
 
     orchestrator = CollaborativeOrchestrator(
-        settings=_FakeSettings(),
         edge_client=edge_client,
         cloud_client=cloud_client,
+        edge_agent=edge_agent,
+        cloud_agent=cloud_agent,
         privacy_detector=privacy_detector,
         sanitizer=sanitizer,
-        budget_tracker=budget_tracker,
     )
 
     chat_service = ChatService(
         orchestrator=orchestrator,
         session_store=session_store,
         short_term_memory=short_term_memory,
-        budget_tracker=budget_tracker,
-        long_term_memory=None,
+        cloud_memory=None,
+        local_memory=None,
     )
     return chat_service, edge_client
-
-
-class _FakeSettings:
-    """Minimal settings stub for the orchestrator."""
-
-    class privacy:
-        sanitize_cost_epsilon = 0.3
-        sketch_refine_cost_epsilon = 1.5
-
-    class edge_llm:
-        provider = "fake"
-        model_name = "fake"
-        base_url = "http://localhost"
-        api_key = "fake"
 
 
 # ── Tests ────────────────────────────────────────────────────────────────
@@ -179,24 +190,6 @@ class TestChatOrchestratorIntegration:
 
         # The orchestrator should have detected PII and routed accordingly
         assert result.privacy_level in ("S1", "S2", "S3")
-
-    @pytest.mark.asyncio
-    async def test_budget_decrements(self) -> None:
-        """Privacy budget should decrease after privacy-consuming modes."""
-        service, _ = _make_chat_service(
-            llm_responses=[
-                '{"level": "S2", "confidence": 0.8, "reason": "general"}',
-                '{"level": "L2"}',
-                "Response",
-            ]
-        )
-        budget_before = service._budget.get_remaining("s1")
-
-        await service.chat("general question", session_id="s1")
-
-        budget_after = service._budget.get_remaining("s1")
-        # Budget may or may not decrease depending on routing
-        assert budget_after <= budget_before
 
 
 class TestReActAgentMemoryIntegration:

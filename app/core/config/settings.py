@@ -51,15 +51,6 @@ class PrivacySettings(BaseSettings):
 
     model_config = {"env_prefix": "PRIVACY_"}
 
-    default_epsilon: float = Field(
-        default=8.0, description="Default privacy budget (ε) per session"
-    )
-    sanitize_cost_epsilon: float = Field(
-        default=0.3, description="ε cost for sanitize-cloud-restore mode"
-    )
-    sketch_refine_cost_epsilon: float = Field(
-        default=1.5, description="ε cost for sketch-refine mode"
-    )
     slm_model: str = Field(
         default="qwen2.5:1.5b", description="SLM for privacy judgment"
     )
@@ -69,14 +60,19 @@ class PrivacySettings(BaseSettings):
 class VectorStoreSettings(BaseSettings):
     """Vector store configuration."""
 
-    model_config = {"env_prefix": "VECTOR_STORE_"}
+    model_config = {"env_prefix": "QDRANT_"}
 
     provider: str = Field(default="qdrant", description="Vector DB provider")
-    host: str = Field(default="localhost", description="Qdrant host")
-    port: int = Field(default=6333, description="Qdrant port")
-    collection_name: str = Field(
+    url: str = Field(
+        default="http://localhost:6333",
+        description="Qdrant URL (local or cloud)",
+    )
+    api_key: str = Field(default="", description="Qdrant API key (for cloud)")
+    collection: str = Field(
         default="agent_memory", description="Default collection"
     )
+    vector_size: int = Field(default=384, description="Embedding vector dimension")
+    timeout: int = Field(default=30, description="Connection timeout in seconds")
 
 
 class Settings(BaseSettings):

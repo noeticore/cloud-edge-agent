@@ -83,6 +83,7 @@ class AgentState(TypedDict):
     done: bool
     iteration: int
     max_iterations: int
+    total_tokens: int
 
 
 # ---------------------------------------------------------------------------
@@ -130,10 +131,15 @@ def _make_agent_node(llm: LLMClient):
     async def agent_node(state: AgentState) -> dict:
         messages = state["messages"]
         iteration = state["iteration"]
+        total_tokens = state.get("total_tokens", 0)
 
         logger.info("langgraph_agent_think", iteration=iteration + 1)
         response = await llm.invoke(messages)
         raw_text = response.content
+
+        # Accumulate token usage
+        if response.usage:
+            total_tokens += response.usage.total_tokens
 
         thought, action, action_input, final_answer = _parse_llm_output(raw_text)
 
@@ -149,6 +155,7 @@ def _make_agent_node(llm: LLMClient):
                 "answer": final_answer,
                 "done": True,
                 "iteration": iteration + 1,
+                "total_tokens": total_tokens,
             }
 
         if action:
@@ -167,6 +174,7 @@ def _make_agent_node(llm: LLMClient):
                 "steps": state["steps"] + [step],
                 "done": False,
                 "iteration": iteration + 1,
+                "total_tokens": total_tokens,
             }
 
         # No recognizable action or final answer — treat as final
@@ -181,6 +189,7 @@ def _make_agent_node(llm: LLMClient):
             "answer": raw_text,
             "done": True,
             "iteration": iteration + 1,
+            "total_tokens": total_tokens,
         }
 
     return agent_node
@@ -304,6 +313,11 @@ class ReActAgent(BaseAgent):
         self._max_iterations = max_iterations
         self._graph = build_react_graph(llm_client, tool_registry)
 
+    @property
+    def tool_registry(self) -> ToolRegistry:
+        """Return the tool registry used by this agent."""
+        return self._tools
+
     async def run(self, query: str, context: dict | None = None) -> AgentResult:
         """Execute the ReAct loop via LangGraph."""
         start_time = time.monotonic()
@@ -322,6 +336,7 @@ class ReActAgent(BaseAgent):
             "done": False,
             "iteration": 0,
             "max_iterations": self._max_iterations,
+            "total_tokens": 0,
         }
 
         logger.info("langgraph_agent_start", query=query[:80])
@@ -333,6 +348,7 @@ class ReActAgent(BaseAgent):
 
         answer = final_state.get("answer") or "I couldn't complete the task."
         steps = final_state.get("steps", [])
+        total_tokens = final_state.get("total_tokens", 0)
 
         logger.info(
             "langgraph_agent_done",
@@ -343,6 +359,6 @@ class ReActAgent(BaseAgent):
         return AgentResult(
             answer=answer,
             steps=steps,
-            total_tokens=0,
+            total_tokens=total_tokens,
             latency_ms=round(elapsed_ms, 1),
         )

@@ -7,11 +7,12 @@ Implements 4 modes:
   Mode D: Sketch-Refine   — edge sketch → cloud refine → edge restore
 """
 
+import json
 import time
 from dataclasses import dataclass
 
-from app.core.config.settings import Settings
 from app.core.logger.logger import get_logger
+from app.domain.agent.agent import BaseAgent
 from app.domain.llm.llm_client import LLMClient, LLMMessage
 from app.domain.privacy.policy import (
     CollaborateMode,
@@ -20,7 +21,6 @@ from app.domain.privacy.policy import (
     route,
 )
 from app.domain.privacy.privacy import (
-    PrivacyBudgetTracker,
     PrivacyDetection,
     PrivacyDetector,
     Sanitizer,
@@ -52,8 +52,6 @@ async def analyze_complexity(text: str, edge_client: LLMClient) -> ComplexityLev
     messages = [LLMMessage(role="user", content=_COMPLEXITY_PROMPT.format(text=text))]
     try:
         response = await edge_client.invoke(messages)
-        import json
-
         parsed = json.loads(response.content.strip())
         return ComplexityLevel[parsed["level"]]
     except Exception as exc:
@@ -93,19 +91,19 @@ class CollaborativeOrchestrator:
 
     def __init__(
         self,
-        settings: Settings,
         edge_client: LLMClient,
         cloud_client: LLMClient,
+        edge_agent: BaseAgent,
+        cloud_agent: BaseAgent,
         privacy_detector: PrivacyDetector,
         sanitizer: Sanitizer,
-        budget_tracker: PrivacyBudgetTracker,
     ) -> None:
-        self._settings = settings
         self._edge = edge_client
         self._cloud = cloud_client
+        self._edge_agent = edge_agent
+        self._cloud_agent = cloud_agent
         self._detector = privacy_detector
         self._sanitizer = sanitizer
-        self._budget = budget_tracker
 
     async def process(
         self, query: str, session_id: str
@@ -119,12 +117,10 @@ class CollaborativeOrchestrator:
         # Step 2: Complexity analysis
         complexity = await analyze_complexity(query, self._edge)
 
-        # Step 3: Check budget and route
-        budget_exhausted = self._budget.is_exhausted(session_id)
+        # Step 3: Route based on privacy and complexity
         routing = route(
             privacy_level=privacy_result.level,
             complexity=complexity,
-            budget_exhausted=budget_exhausted,
         )
 
         logger.info(
@@ -133,7 +129,6 @@ class CollaborativeOrchestrator:
             mode=routing.mode.value,
             privacy=privacy_result.level.value,
             complexity=complexity.value,
-            budget_remaining=self._budget.get_remaining(session_id),
         )
 
         # Step 4: Execute mode
@@ -167,35 +162,29 @@ class CollaborativeOrchestrator:
         elif mode == CollaborateMode.DIRECT_CLOUD:
             return await self._mode_direct_cloud(query)
         elif mode == CollaborateMode.SANITIZE_CLOUD:
-            cost = self._settings.privacy.sanitize_cost_epsilon
-            return await self._mode_sanitize_cloud(query, privacy_result, session_id, cost)
+            return await self._mode_sanitize_cloud(query, privacy_result)
         elif mode == CollaborateMode.SKETCH_REFINE:
-            cost = self._settings.privacy.sketch_refine_cost_epsilon
-            return await self._mode_sketch_refine(query, privacy_result, session_id, cost)
+            return await self._mode_sketch_refine(query, privacy_result)
         else:
             return await self._mode_direct_local(query)
 
     # --- Mode A: Direct Local ---
     async def _mode_direct_local(self, query: str) -> str:
-        """Simple local execution — edge agent handles everything."""
-        messages = [LLMMessage(role="user", content=query)]
-        response = await self._edge.invoke(messages)
-        return response.content
+        """Local execution via edge agent — supports tool calls."""
+        result = await self._edge_agent.run(query)
+        return result.answer
 
     # --- Mode B: Direct Cloud ---
     async def _mode_direct_cloud(self, query: str) -> str:
-        """Simple cloud execution — no privacy concerns."""
-        messages = [LLMMessage(role="user", content=query)]
-        response = await self._cloud.invoke(messages)
-        return response.content
+        """Cloud execution via cloud agent — supports tool calls."""
+        result = await self._cloud_agent.run(query)
+        return result.answer
 
     # --- Mode C: Sanitize → Cloud → Restore ---
     async def _mode_sanitize_cloud(
         self,
         query: str,
         privacy_result: PrivacyDetection,
-        session_id: str,
-        cost: float,
     ) -> str:
         """Sanitize sensitive data, send to cloud, restore in result."""
         # Sanitize
@@ -216,9 +205,6 @@ class CollaborativeOrchestrator:
             response.content, sanitize_result.mapping
         )
 
-        # Consume privacy budget
-        self._budget.consume(session_id, cost)
-
         return restored
 
     # --- Mode D: Sketch-Refine (PBCR innovation) ---
@@ -226,8 +212,6 @@ class CollaborativeOrchestrator:
         self,
         query: str,
         privacy_result: PrivacyDetection,
-        session_id: str,
-        cost: float,
     ) -> str:
         """Edge generates a privacy-safe sketch, cloud refines it.
 
@@ -260,8 +244,5 @@ class CollaborativeOrchestrator:
         restored = await self._sanitizer.restore(
             refined_response.content, sanitize_result.mapping
         )
-
-        # Consume privacy budget
-        self._budget.consume(session_id, cost)
 
         return restored

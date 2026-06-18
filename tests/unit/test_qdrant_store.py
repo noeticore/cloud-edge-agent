@@ -24,9 +24,10 @@ def _make_settings() -> VectorStoreSettings:
     """Create test vector store settings."""
     return VectorStoreSettings(
         provider="qdrant",
-        host="localhost",
-        port=6333,
-        collection_name="test_collection",
+        url="http://localhost:6333",
+        api_key="",
+        collection="test_collection",
+        vector_size=3,
     )
 
 
@@ -37,7 +38,6 @@ def _make_store() -> tuple[QdrantMemoryStore, AsyncMock]:
     store = QdrantMemoryStore(
         embedder=embedder,
         settings=settings,
-        vector_size=3,
     )
     mock_client = AsyncMock()
     # Simulate collection already exists
@@ -112,7 +112,10 @@ class TestQdrantMemoryStoreSearch:
             "metadata": {"source": "test"},
             "session_id": "s1",
         }
-        mock_client.search.return_value = [hit]
+        # Mock query_points (newer API)
+        mock_result = MagicMock()
+        mock_result.points = [hit]
+        mock_client.query_points.return_value = mock_result
 
         results = await store.search("query", top_k=3)
 
@@ -126,18 +129,22 @@ class TestQdrantMemoryStoreSearch:
     @pytest.mark.asyncio
     async def test_search_passes_vector_and_top_k(self) -> None:
         store, mock_client = _make_store()
-        mock_client.search.return_value = []
+        mock_result = MagicMock()
+        mock_result.points = []
+        mock_client.query_points.return_value = mock_result
 
         await store.search("test query", top_k=10)
 
-        call_args = mock_client.search.call_args
-        assert call_args.kwargs["query_vector"] == [0.1, 0.2, 0.3]
+        call_args = mock_client.query_points.call_args
+        assert call_args.kwargs["query"] == [0.1, 0.2, 0.3]
         assert call_args.kwargs["limit"] == 10
 
     @pytest.mark.asyncio
     async def test_search_empty_results(self) -> None:
         store, mock_client = _make_store()
-        mock_client.search.return_value = []
+        mock_result = MagicMock()
+        mock_result.points = []
+        mock_client.query_points.return_value = mock_result
 
         results = await store.search("nothing")
 
@@ -146,7 +153,7 @@ class TestQdrantMemoryStoreSearch:
     @pytest.mark.asyncio
     async def test_search_wraps_error_as_memory_exception(self) -> None:
         store, mock_client = _make_store()
-        mock_client.search.side_effect = RuntimeError("connection lost")
+        mock_client.query_points.side_effect = RuntimeError("connection lost")
 
         with pytest.raises(MemoryException, match="Failed to search memories"):
             await store.search("query")

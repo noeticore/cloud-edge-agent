@@ -56,8 +56,9 @@ class FakeLongTermMemory(MemoryStore):
 
 def _make_chat_service(
     short_term: MemoryStore | None = None,
-    long_term: MemoryStore | None = None,
-) -> tuple[ChatService, MagicMock, MagicMock, MagicMock]:
+    cloud_memory: MemoryStore | None = None,
+    local_memory: MemoryStore | None = None,
+) -> tuple[ChatService, MagicMock, MagicMock]:
     """Create ChatService with mocked orchestrator and session store."""
     orchestrator = MagicMock()
     orchestrator.process = AsyncMock(
@@ -73,19 +74,16 @@ def _make_chat_service(
     session_store.get.return_value = MagicMock()  # session exists
     session_store.add_message = MagicMock()
 
-    budget_tracker = MagicMock()
-    budget_tracker.get_remaining.return_value = 7.0
-
     st = short_term or FakeShortTermMemory()
 
     service = ChatService(
         orchestrator=orchestrator,
         session_store=session_store,
         short_term_memory=st,
-        budget_tracker=budget_tracker,
-        long_term_memory=long_term,
+        cloud_memory=cloud_memory,
+        local_memory=local_memory,
     )
-    return service, orchestrator, session_store, budget_tracker
+    return service, orchestrator, session_store
 
 
 class TestEnrichQuery:
@@ -123,45 +121,45 @@ class TestRetrieveContext:
         await st.add(MemoryEntry(content="msg1", session_id="s1", metadata={"role": "user"}))
         await st.add(MemoryEntry(content="msg2", session_id="s1", metadata={"role": "assistant"}))
 
-        service, _, _, _ = _make_chat_service(short_term=st)
+        service, _, _ = _make_chat_service(short_term=st)
         context = await service._retrieve_context("query", "s1")
 
         assert len(context) >= 2
         assert any(e.content == "msg1" for e in context)
 
     @pytest.mark.asyncio
-    async def test_retrieves_from_long_term(self) -> None:
-        lt = FakeLongTermMemory(
+    async def test_retrieves_from_cloud_memory(self) -> None:
+        cm = FakeLongTermMemory(
             entries=[MemoryEntry(content="past conversation", session_id="other", score=0.9)]
         )
 
-        service, _, _, _ = _make_chat_service(long_term=lt)
+        service, _, _ = _make_chat_service(cloud_memory=cm)
         context = await service._retrieve_context("query", "s1")
 
         assert any(e.content == "past conversation" for e in context)
 
     @pytest.mark.asyncio
-    async def test_long_term_failure_graceful(self) -> None:
-        """If long-term search fails, short-term context is still returned."""
+    async def test_cloud_memory_failure_graceful(self) -> None:
+        """If cloud memory search fails, short-term context is still returned."""
 
-        class BrokenLongTerm(FakeLongTermMemory):
+        class BrokenCloudMemory(FakeLongTermMemory):
             async def search(self, query: str, top_k: int = 5) -> list[MemoryEntry]:
                 raise RuntimeError("Qdrant down")
 
         st = FakeShortTermMemory()
         await st.add(MemoryEntry(content="msg", session_id="s1"))
 
-        service, _, _, _ = _make_chat_service(short_term=st, long_term=BrokenLongTerm())
+        service, _, _ = _make_chat_service(short_term=st, cloud_memory=BrokenCloudMemory())
         context = await service._retrieve_context("query", "s1")
 
         assert any(e.content == "msg" for e in context)
 
     @pytest.mark.asyncio
-    async def test_no_long_term_returns_short_term_only(self) -> None:
+    async def test_no_cloud_memory_returns_short_term_only(self) -> None:
         st = FakeShortTermMemory()
         await st.add(MemoryEntry(content="msg", session_id="s1"))
 
-        service, _, _, _ = _make_chat_service(short_term=st, long_term=None)
+        service, _, _ = _make_chat_service(short_term=st, cloud_memory=None)
         context = await service._retrieve_context("query", "s1")
 
         assert len(context) >= 1
@@ -171,19 +169,20 @@ class TestChatFlow:
     """Tests for the full ChatService.chat() flow."""
 
     @pytest.mark.asyncio
-    async def test_chat_stores_in_long_term(self) -> None:
-        lt = FakeLongTermMemory()
-        service, _, _, _ = _make_chat_service(long_term=lt)
+    async def test_chat_stores_s1_in_cloud(self) -> None:
+        """S1 conversations should be stored in cloud memory."""
+        cm = FakeLongTermMemory()
+        service, _, _ = _make_chat_service(cloud_memory=cm)
 
         await service.chat("hello", session_id="s1")
 
-        assert len(lt.added) == 1
-        assert "hello" in lt.added[0].content
-        assert "test answer" in lt.added[0].content
+        assert len(cm.added) == 1
+        assert "hello" in cm.added[0].content
+        assert "test answer" in cm.added[0].content
 
     @pytest.mark.asyncio
-    async def test_chat_without_long_term(self) -> None:
-        service, orchestrator, _, _ = _make_chat_service(long_term=None)
+    async def test_chat_without_cloud_memory(self) -> None:
+        service, orchestrator, _ = _make_chat_service(cloud_memory=None)
 
         result = await service.chat("hello", session_id="s1")
 
@@ -198,7 +197,7 @@ class TestChatFlow:
             content="my name is Alice", session_id="s1", metadata={"role": "user"}
         ))
 
-        service, orchestrator, _, _ = _make_chat_service(short_term=st)
+        service, orchestrator, _ = _make_chat_service(short_term=st)
 
         await service.chat("what's my name?", session_id="s1")
 

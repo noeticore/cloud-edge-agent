@@ -10,7 +10,6 @@ import uuid
 from app.core.logger.logger import get_logger
 from app.domain.llm.llm_client import LLMClient, LLMMessage
 from app.domain.privacy.privacy import (
-    PrivacyBudgetTracker,
     PrivacyDetection,
     PrivacyDetector,
     PrivacyLevel,
@@ -233,41 +232,3 @@ class RegexSanitizer(Sanitizer):
         for placeholder, original in mapping.items():
             result = result.replace(placeholder, original)
         return result
-
-
-# ---------------------------------------------------------------------------
-# Privacy Budget Tracker
-# ---------------------------------------------------------------------------
-
-class EpsilonBudgetTracker(PrivacyBudgetTracker):
-    """Track per-session ε privacy budget.
-
-    Each cloud interaction consumes a configurable amount of ε.
-    When budget is exhausted, all requests are forced to local execution.
-    """
-
-    def __init__(self, default_epsilon: float = 8.0) -> None:
-        self._default_epsilon = default_epsilon
-        self._budgets: dict[str, float] = {}  # session_id → remaining ε
-
-    def get_remaining(self, session_id: str) -> float:
-        """Return remaining ε for the session."""
-        if session_id not in self._budgets:
-            self._budgets[session_id] = self._default_epsilon
-        return self._budgets[session_id]
-
-    def consume(self, session_id: str, cost: float) -> float:
-        """Consume ε budget and return remaining."""
-        remaining = self.get_remaining(session_id)
-        self._budgets[session_id] = max(0.0, remaining - cost)
-        logger.info(
-            "privacy_budget_consume",
-            session_id=session_id,
-            cost=cost,
-            remaining=self._budgets[session_id],
-        )
-        return self._budgets[session_id]
-
-    def is_exhausted(self, session_id: str) -> bool:
-        """Check if budget is exhausted."""
-        return self.get_remaining(session_id) <= 0.0
