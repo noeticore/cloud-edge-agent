@@ -101,7 +101,7 @@ Rules:
 - S2 (Sensitive): Contains some personal info that could be redacted (names, phone numbers, etc.)
 - S3 (Confidential): Highly sensitive data that should NEVER leave the local device (bank statements, medical records, private keys, passwords)
 
-Respond with ONLY a JSON object: {"level": "S1|S2|S3", "confidence": 0.0-1.0, "reason": "brief explanation"}
+Respond with ONLY a JSON object: {{"level": "S1|S2|S3", "confidence": 0.0-1.0, "reason": "brief explanation"}}
 
 Text to analyze:
 {text}"""

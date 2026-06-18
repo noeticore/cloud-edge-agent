@@ -20,7 +20,7 @@ from typing import TypedDict
 from langgraph.graph import END, StateGraph
 
 from app.core.logger.logger import get_logger
-from app.domain.agent.agent import AgentResult, AgentStep
+from app.domain.agent.agent import AgentResult, AgentRole, AgentStep, BaseAgent
 from app.domain.llm.llm_client import LLMClient, LLMMessage
 from app.domain.tool.registry import ToolRegistry
 
@@ -285,7 +285,7 @@ def build_react_graph(
 # Public API — same interface as before
 # ---------------------------------------------------------------------------
 
-class ReActAgent:
+class ReActAgent(BaseAgent):
     """LangGraph-powered ReAct agent.
 
     Same interface as before — `run(query)` returns `AgentResult`.
@@ -295,8 +295,10 @@ class ReActAgent:
         self,
         llm_client: LLMClient,
         tool_registry: ToolRegistry,
+        role: AgentRole = AgentRole.EDGE,
         max_iterations: int = MAX_ITERATIONS,
     ) -> None:
+        self.role = role
         self._llm = llm_client
         self._tools = tool_registry
         self._max_iterations = max_iterations

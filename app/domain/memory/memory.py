@@ -18,6 +18,7 @@ class MemoryEntry:
     metadata: dict = field(default_factory=dict)
     session_id: str = ""
     entry_id: str = ""
+    score: float = 0.0
 
 
 class MemoryStore(ABC):

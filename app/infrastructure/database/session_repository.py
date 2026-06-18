@@ -71,7 +71,16 @@ class InMemoryShortTermStore(MemoryStore):
             for e in self._entries
         ]
         scored.sort(key=lambda x: x[1], reverse=True)
-        return [e for e, _ in scored[:top_k]]
+        result = []
+        for entry, score in scored[:top_k]:
+            result.append(MemoryEntry(
+                content=entry.content,
+                metadata=entry.metadata,
+                session_id=entry.session_id,
+                entry_id=entry.entry_id,
+                score=score,
+            ))
+        return result
 
     async def get_recent(self, limit: int = 10) -> list[MemoryEntry]:
         return self._entries[-limit:]

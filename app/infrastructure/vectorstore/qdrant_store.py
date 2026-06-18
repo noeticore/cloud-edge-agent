@@ -1,30 +1,37 @@
 """Qdrant-backed vector store for long-term memory and RAG."""
 
-from qdrant_client import AsyncQdrantClient
-from qdrant_client.models import Distance, VectorParams
+import uuid
 
+from qdrant_client import AsyncQdrantClient
+from qdrant_client.models import Distance, PointStruct, VectorParams
+
+from app.core.config.settings import VectorStoreSettings
 from app.core.exceptions.exceptions import MemoryException
 from app.core.logger.logger import get_logger
 from app.domain.memory.memory import MemoryEntry, MemoryStore, MemoryType
+from app.domain.rag.rag import Embedder
 
 logger = get_logger(__name__)
 
 
 class QdrantMemoryStore(MemoryStore):
-    """Long-term memory backed by Qdrant vector database."""
+    """Long-term memory backed by Qdrant vector database.
+
+    Requires an Embedder to compute vectors for add/search operations.
+    """
 
     memory_type = MemoryType.LONG_TERM
 
     def __init__(
         self,
-        host: str = "localhost",
-        port: int = 6333,
-        collection: str = "agent_memory",
+        embedder: Embedder,
+        settings: VectorStoreSettings,
         vector_size: int = 1536,
     ) -> None:
-        self._host = host
-        self._port = port
-        self._collection = collection
+        self._embedder = embedder
+        self._host = settings.host
+        self._port = settings.port
+        self._collection = settings.collection_name
         self._vector_size = vector_size
         self._client: AsyncQdrantClient | None = None
 
@@ -46,12 +53,73 @@ class QdrantMemoryStore(MemoryStore):
         return self._client
 
     async def add(self, entry: MemoryEntry) -> str:
-        """Store a memory entry with its embedding."""
-        raise NotImplementedError("Embedding computation must be provided externally")
+        """Store a memory entry with its embedding.
+
+        Args:
+            entry: memory entry to store.
+
+        Returns:
+            The point ID (UUID string) assigned to this entry.
+        """
+        client = await self._ensure_client()
+        point_id = entry.entry_id or str(uuid.uuid4())
+        vector = await self._embedder.embed(entry.content)
+        try:
+            await client.upsert(
+                collection_name=self._collection,
+                points=[
+                    PointStruct(
+                        id=point_id,
+                        vector=vector,
+                        payload={
+                            "content": entry.content,
+                            "metadata": entry.metadata,
+                            "session_id": entry.session_id,
+                        },
+                    )
+                ],
+            )
+            logger.info(
+                "qdrant_add",
+                collection=self._collection,
+                point_id=point_id,
+                content_len=len(entry.content),
+            )
+            return point_id
+        except Exception as exc:
+            raise MemoryException(f"Failed to add memory: {exc}") from exc
 
     async def search(self, query: str, top_k: int = 5) -> list[MemoryEntry]:
-        """Search by vector similarity (requires external embedding)."""
-        raise NotImplementedError("Embedding computation must be provided externally")
+        """Search by vector similarity.
+
+        Args:
+            query: natural language query to search for.
+            top_k: maximum number of results to return.
+
+        Returns:
+            List of matching MemoryEntry objects, ordered by relevance.
+        """
+        client = await self._ensure_client()
+        vector = await self._embedder.embed(query)
+        try:
+            results = await client.search(
+                collection_name=self._collection,
+                query_vector=vector,
+                limit=top_k,
+                with_payload=True,
+            )
+            return [
+                MemoryEntry(
+                    content=hit.payload.get("content", ""),
+                    metadata=hit.payload.get("metadata", {}),
+                    session_id=hit.payload.get("session_id", ""),
+                    entry_id=str(hit.id),
+                    score=hit.score,
+                )
+                for hit in results
+            ]
+        except Exception as exc:
+            raise MemoryException(f"Failed to search memories: {exc}") from exc
 
     async def get_recent(self, limit: int = 10) -> list[MemoryEntry]:
         """Get most recent entries (scroll by insertion order)."""

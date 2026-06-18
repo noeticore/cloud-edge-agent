@@ -41,7 +41,7 @@ Levels:
 - L4: agent task (requires tool use)
 - L5: long-chain complex task
 
-Respond with ONLY a JSON object: {"level": "L1|L2|L3|L4|L5"}
+Respond with ONLY a JSON object: {{"level": "L1|L2|L3|L4|L5"}}
 
 Task:
 {text}"""

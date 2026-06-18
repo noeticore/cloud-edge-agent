@@ -17,13 +17,18 @@ from dotenv import load_dotenv
 from app.core.config.settings import get_settings
 from app.core.logger.logger import get_logger, setup_logging
 from app.domain.agent.react_agent import ReActAgent
+from app.domain.memory.memory import MemoryEntry
 from app.domain.tool.registry import ToolRegistry
+from app.infrastructure.database.session_repository import InMemoryShortTermStore
 from app.infrastructure.llm.client_factory import create_cloud_llm_client
 from tools.calculator_tool import CalculatorTool
 from tools.search_tool import SearchTool
 from tools.time_tool import TimeTool
 
 logger = get_logger("cli")
+
+# Maximum past messages to inject as context
+_MAX_MEMORY_MESSAGES = 6
 
 # ── Banner ──────────────────────────────────────────────────────────────
 BANNER = r"""
@@ -35,6 +40,7 @@ BANNER = r"""
   Type your message and press Enter.
   Type 'quit' or 'exit' to leave.
   Type 'trace' to toggle step-by-step reasoning display.
+  Type 'memory' to inspect stored memory.
 """
 
 
@@ -69,9 +75,12 @@ async def main() -> None:
     registry.register(SearchTool())
     print(f"  ✓ Tools: {', '.join(t['name'] for t in registry.list_tools())}")
 
-    # Create agent
+    # Create agent and memory
     agent = ReActAgent(llm_client=llm_client, tool_registry=registry)
+    memory = InMemoryShortTermStore()
+    session_id = "cli-session"
     print(f"  ✓ Agent ready (max {agent._max_iterations} iterations)")
+    print(f"  ✓ Memory enabled (short-term, session={session_id})")
 
     print(BANNER)
 
@@ -93,10 +102,43 @@ async def main() -> None:
             show_trace = not show_trace
             print(f"  Trace mode: {'ON' if show_trace else 'OFF'}")
             continue
+        if user_input.lower() == "memory":
+            entries = await memory.get_recent(limit=20)
+            print(f"  ── Memory ({len(entries)} entries) ──────────────")
+            for e in entries:
+                role = e.metadata.get("role", "?")
+                preview = e.content[:100].replace("\n", " ")
+                print(f"  [{role}] {preview}")
+            print("  ───────────────────────────────────────────")
+            continue
+
+        # Build context from memory
+        context_entries = await memory.search(user_input, top_k=_MAX_MEMORY_MESSAGES)
+        context_text = ""
+        if context_entries:
+            lines = []
+            for entry in context_entries:
+                role = entry.metadata.get("role", "?")
+                lines.append(f"[{role}] {entry.content}")
+            context_text = "Relevant conversation history:\n" + "\n".join(lines) + "\n\n"
+
+        query_with_context = context_text + "Current question: " + user_input
 
         # Run agent
         print("  Thinking...")
-        result = await agent.run(user_input)
+        result = await agent.run(query_with_context)
+
+        # Store in memory
+        await memory.add(MemoryEntry(
+            content=user_input,
+            session_id=session_id,
+            metadata={"role": "user"},
+        ))
+        await memory.add(MemoryEntry(
+            content=result.answer,
+            session_id=session_id,
+            metadata={"role": "assistant"},
+        ))
 
         # Show trace if enabled
         if show_trace and result.steps:
