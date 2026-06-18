@@ -116,7 +116,7 @@ async def _slm_judge(text: str, slm_client: LLMClient) -> PrivacyDetection:
         import json
 
         parsed = json.loads(response.content.strip())
-        level = PrivacyLevel(parsed.get("level", "S2"))
+        level = PrivacyLevel(parsed.get("level", "NA"))
         confidence = float(parsed.get("confidence", 0.5))
         reason = parsed.get("reason", "")
         return PrivacyDetection(
@@ -124,11 +124,10 @@ async def _slm_judge(text: str, slm_client: LLMClient) -> PrivacyDetection:
         )
     except Exception as exc:
         logger.warning("slm_judge_failed", error=str(exc))
-        # Conservative fallback: treat as S2
         return PrivacyDetection(
-            level=PrivacyLevel.S2,
-            confidence=0.3,
-            reason=f"SLM judge failed, defaulting to S2: {exc}",
+            level=PrivacyLevel.NA,
+            confidence=0.0,
+            reason=f"SLM judge failed, unable to determine: {exc}",
         )
 
 
@@ -142,10 +141,11 @@ class ThreeLayerPrivacyDetector(PrivacyDetector):
     Uses short-circuit logic:
     - If regex finds high-confidence PII → S2 immediately
     - If NER finds entities → S2
-    - Otherwise, ask SLM for judgment
+    - Otherwise, ask SLM for judgment → S1/S2/S3/NA
 
-    SLM client MUST be local — never cloud. If edge is unavailable
-    (slm_client is None), Layer 3 is skipped and S2 is the default.
+    SLM client MUST be local — never cloud. If SLM is unavailable,
+    Layer 3 returns NA (unknown), never S2 (sensitive) since no
+    detection actually ran.
     """
 
     def __init__(self, slm_client: LLMClient | None) -> None:
@@ -194,12 +194,12 @@ class ThreeLayerPrivacyDetector(PrivacyDetector):
             )
             return slm_result
 
-        # No local SLM — conservative default, never cloud
+        # No local SLM — unable to judge, no false S2
         logger.info("privacy_slm_skipped", reason="edge_unavailable")
         return PrivacyDetection(
-            level=PrivacyLevel.S2,
-            confidence=0.5,
-            reason="SLM unavailable (edge down), defaulting to S2",
+            level=PrivacyLevel.NA,
+            confidence=0.0,
+            reason="SLM unavailable (edge down), privacy level unknown",
         )
 
 
