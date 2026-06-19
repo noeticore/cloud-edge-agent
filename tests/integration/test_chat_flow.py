@@ -121,18 +121,16 @@ class TestChatMemoryIntegration:
     @pytest.mark.asyncio
     async def test_multi_turn_memory(self) -> None:
         """Agent should remember context from earlier turns."""
+        # New flow: complexity first, SLM skipped for L1-L2.
         # Each chat() call triggers:
-        #   1. SLM judge (privacy) → JSON
-        #   2. Complexity analyzer → JSON
-        #   3. Orchestrator mode → text response
+        #   1. Complexity analyzer → JSON
+        #   2. Agent answer (via FakeAgent.run, which calls LLM once)
         service, llm = _make_chat_service(
             llm_responses=[
-                # Turn 1
-                '{"level": "S1", "confidence": 0.9, "reason": "safe"}',
+                # Turn 1: complexity=L2 → low → skip privacy, direct local
                 '{"level": "L2"}',
                 "Nice to meet you, Alice!",
-                # Turn 2
-                '{"level": "S1", "confidence": 0.9, "reason": "safe"}',
+                # Turn 2: complexity=L2 → low → skip privacy, direct local
                 '{"level": "L2"}',
                 "Your name is Alice.",
             ]
@@ -153,10 +151,8 @@ class TestChatMemoryIntegration:
     async def test_session_isolation(self) -> None:
         """Different sessions should not share memory."""
         responses = [
-            '{"level": "S1", "confidence": 0.9, "reason": "safe"}',
             '{"level": "L2"}',
             "Got it",
-            '{"level": "S1", "confidence": 0.9, "reason": "safe"}',
             '{"level": "L2"}',
             "I don't know",
         ]
@@ -175,10 +171,11 @@ class TestChatOrchestratorIntegration:
     @pytest.mark.asyncio
     async def test_privacy_routing_sanitizes_pii(self) -> None:
         """PII-heavy queries should be routed through sanitize-cloud mode."""
-        service, llm = _make_chat_service(
+        # New flow: complexity first (L3 to trigger privacy), then cloud answer.
+        # Regex catches phone number → S2 → route(S2, L3) → Sanitize Cloud.
+        service, _ = _make_chat_service(
             llm_responses=[
-                '{"level": "S2", "confidence": 0.95, "reason": "phone number"}',
-                '{"level": "L2"}',
+                '{"level": "L3"}',
                 "Sure, I can help.",
             ]
         )
