@@ -13,6 +13,8 @@ from app.domain.privacy.privacy import (
     PrivacyDetection,
     PrivacyDetector,
     PrivacyLevel,
+    SanitizationMappingRecord,
+    SanitizationMappingStore,
     Sanitizer,
     SanitizeResult,
     SensitiveEntity,
@@ -132,28 +134,85 @@ async def _slm_judge(text: str, slm_client: LLMClient) -> PrivacyDetection:
 
 
 # ---------------------------------------------------------------------------
+# Keyword-based privacy detection (lightweight Layer 2)
+# ---------------------------------------------------------------------------
+
+_PRIVACY_KEYWORDS: dict[str, list[str]] = {
+    "ADDRESS": [
+        "住址", "地址", "家庭住址", "住在哪里", "住在哪", "家住",
+        "小区", "号楼", "单元", "门牌", "街道", "路", "巷",
+    ],
+    "NAME": [
+        "姓名", "名字", "叫什么", "是谁", "我朋友叫", "我同事叫",
+        "我老板", "我领导", "我家人",
+    ],
+    "FINANCIAL": [
+        "银行卡", "存款", "余额", "工资", "收入", "转账",
+        "支付宝", "微信钱包", "信用卡",
+    ],
+    "MEDICAL": [
+        "病历", "诊断", "医院", "处方", "用药", "病情",
+        "体检", "化验",
+    ],
+}
+
+
+def _keyword_detect(text: str) -> list[SensitiveEntity]:
+    """Layer 2: Keyword-based detection for privacy-related topics.
+
+    Catches semantic privacy concerns that regex cannot detect,
+    such as asking about someone's address or name.
+    """
+    entities: list[SensitiveEntity] = []
+    text_lower = text.lower()
+
+    for entity_type, keywords in _PRIVACY_KEYWORDS.items():
+        for keyword in keywords:
+            if keyword in text_lower:
+                # Find the position of the keyword
+                start = text_lower.find(keyword)
+                end = start + len(keyword)
+                entities.append(
+                    SensitiveEntity(
+                        entity_type=entity_type,
+                        value=text[start:end],
+                        start=start,
+                        end=end,
+                    )
+                )
+                break  # One match per type is enough
+
+    return entities
+
+
+# ---------------------------------------------------------------------------
 # Composite Privacy Detector
 # ---------------------------------------------------------------------------
 
+
 class ThreeLayerPrivacyDetector(PrivacyDetector):
-    """Three-layer privacy detection: Regex → NER → SLM.
+    """Privacy detection: Regex → Keywords → SLM.
 
-    Uses short-circuit logic:
-    - If regex finds high-confidence PII → S2 immediately
-    - If NER finds entities → S2
-    - Otherwise, ask SLM for judgment → S1/S2/S3/NA
+    Detection pipeline:
+    - Layer 1 (Regex): structured PII (phone, email, ID card, etc.)
+    - Layer 2 (Keywords): semantic privacy topics (address, name, etc.)
+    - Layer 3 (SLM): deep semantic analysis via local small model
 
-    SLM client MUST be local — never cloud. If SLM is unavailable,
-    Layer 3 returns NA (unknown), never S2 (sensitive) since no
-    detection actually ran.
+    Short-circuit logic:
+    - Layer 1 hit → S2 (high confidence, structured PII found)
+    - Layer 2 hit → S2 (medium confidence, privacy topic detected)
+    - Layer 3 available → use SLM result (S1/S2/S3)
+    - Layer 3 unavailable + no hits → S1 (assume safe, rely on regex/keywords)
+
+    SLM client MUST be local — never cloud.
     """
 
     def __init__(self, slm_client: LLMClient | None) -> None:
         self._slm_client = slm_client
 
     async def detect(self, text: str) -> PrivacyDetection:
-        """Run the three-layer detection pipeline."""
-        # Layer 1: Regex
+        """Run the privacy detection pipeline."""
+        # Layer 1: Regex — structured PII
         regex_entities = _regex_detect(text)
         if regex_entities:
             logger.info(
@@ -168,22 +227,22 @@ class ThreeLayerPrivacyDetector(PrivacyDetector):
                 reason=f"Regex detected {len(regex_entities)} PII entities",
             )
 
-        # Layer 2: NER
-        ner_entities = await _ner_detect(text)
-        if ner_entities:
+        # Layer 2: Keywords — semantic privacy topics
+        keyword_entities = _keyword_detect(text)
+        if keyword_entities:
             logger.info(
-                "privacy_ner_hit",
-                count=len(ner_entities),
-                types=[e.entity_type for e in ner_entities],
+                "privacy_keyword_hit",
+                count=len(keyword_entities),
+                types=[e.entity_type for e in keyword_entities],
             )
             return PrivacyDetection(
                 level=PrivacyLevel.S2,
-                confidence=0.8,
-                entities=ner_entities,
-                reason=f"NER detected {len(ner_entities)} entities",
+                confidence=0.7,
+                entities=keyword_entities,
+                reason=f"Keyword detected {len(keyword_entities)} privacy topics",
             )
 
-        # Layer 3: SLM judge — only when edge is available
+        # Layer 3: SLM judge — deep semantic analysis
         if self._slm_client is not None:
             slm_result = await _slm_judge(text, self._slm_client)
             slm_result.entities = []
@@ -192,14 +251,23 @@ class ThreeLayerPrivacyDetector(PrivacyDetector):
                 level=slm_result.level.value,
                 confidence=slm_result.confidence,
             )
-            return slm_result
+            # If SLM says S2 or S3, trust it
+            if slm_result.level in (PrivacyLevel.S2, PrivacyLevel.S3):
+                return slm_result
+            # If SLM says S1, return S1
+            return PrivacyDetection(
+                level=PrivacyLevel.S1,
+                confidence=slm_result.confidence,
+                reason=f"SLM judged as low risk: {slm_result.reason}",
+            )
 
-        # No local SLM — unable to judge, no false S2
-        logger.info("privacy_slm_skipped", reason="edge_unavailable")
+        # No SLM available — rely on regex/keywords only
+        # If nothing triggered, assume S1 (safe)
+        logger.info("privacy_all_clear", reason="no PII detected, SLM unavailable")
         return PrivacyDetection(
-            level=PrivacyLevel.NA,
-            confidence=0.0,
-            reason="SLM unavailable (edge down), privacy level unknown",
+            level=PrivacyLevel.S1,
+            confidence=0.5,
+            reason="No PII detected (regex/keywords), SLM unavailable",
         )
 
 
@@ -207,17 +275,40 @@ class ThreeLayerPrivacyDetector(PrivacyDetector):
 # Sanitizer implementation
 # ---------------------------------------------------------------------------
 
+
 class RegexSanitizer(Sanitizer):
     """Replace sensitive entities with typed placeholders.
 
     Example: "我的手机是13812345678" → "我的手机是[REDACTED:PHONE:a3f2]"
     The mapping allows exact restoration.
+
+    Supports cross-session mapping reuse via SanitizationMappingStore:
+    - The same original value always gets the same placeholder.
+    - Mappings persist across sessions and restarts.
     """
 
+    def __init__(
+        self,
+        mapping_store: SanitizationMappingStore | None = None,
+    ) -> None:
+        """Initialize sanitizer.
+
+        Args:
+            mapping_store: optional persistent mapping store for cross-session reuse.
+        """
+        self._mapping_store = mapping_store
+
     async def sanitize(
-        self, text: str, entities: list[SensitiveEntity]
+        self,
+        text: str,
+        entities: list[SensitiveEntity],
+        session_id: str = "",
     ) -> SanitizeResult:
-        """Replace each entity with a placeholder."""
+        """Replace each entity with a placeholder.
+
+        If mapping_store is available, reuses existing placeholders for
+        known values to maintain cross-session consistency.
+        """
         if not entities:
             return SanitizeResult(sanitized_text=text, mapping={}, entities_replaced=0)
 
@@ -227,8 +318,10 @@ class RegexSanitizer(Sanitizer):
         mapping: dict[str, str] = {}
 
         for entity in sorted_entities:
-            tag = uuid.uuid4().hex[:6]
-            placeholder = f"[REDACTED:{entity.entity_type}:{tag}]"
+            # Try to reuse existing placeholder for this value
+            placeholder = await self._get_or_create_placeholder(
+                entity.entity_type, entity.value, session_id
+            )
             sanitized = sanitized[: entity.start] + placeholder + sanitized[entity.end :]
             mapping[placeholder] = entity.value
 
@@ -238,9 +331,78 @@ class RegexSanitizer(Sanitizer):
             entities_replaced=len(entities),
         )
 
+    async def _get_or_create_placeholder(
+        self,
+        entity_type: str,
+        original_value: str,
+        session_id: str = "",
+    ) -> str:
+        """Get existing placeholder or create a new one.
+
+        If mapping_store is available, checks for existing mapping first.
+        Otherwise, generates a new random placeholder.
+        """
+        # Check for existing mapping
+        if self._mapping_store is not None:
+            existing = await self._mapping_store.get_by_original(original_value)
+            if existing is not None:
+                # Update usage count
+                await self._mapping_store.increment_usage(
+                    existing.placeholder, session_id
+                )
+                logger.info(
+                    "mapping_reused",
+                    placeholder=existing.placeholder,
+                    entity_type=entity_type,
+                )
+                return existing.placeholder
+
+        # Create new placeholder
+        tag = uuid.uuid4().hex[:6]
+        placeholder = f"[REDACTED:{entity_type}:{tag}]"
+
+        # Save to store if available
+        if self._mapping_store is not None:
+            import time
+
+            record = SanitizationMappingRecord(
+                placeholder=placeholder,
+                original_value=original_value,
+                entity_type=entity_type,
+                created_at=time.time(),
+                usage_count=1,
+                session_ids=[session_id] if session_id else [],
+            )
+            await self._mapping_store.save(record)
+
+        return placeholder
+
     async def restore(self, sanitized_text: str, mapping: dict[str, str]) -> str:
         """Restore original values from the mapping."""
         result = sanitized_text
         for placeholder, original in mapping.items():
             result = result.replace(placeholder, original)
+        return result
+
+    async def restore_from_store(self, sanitized_text: str) -> str:
+        """Restore original values using the persistent mapping store.
+
+        Useful when the local mapping dict is not available but the
+        store has all mappings persisted.
+        """
+        if self._mapping_store is None:
+            return sanitized_text
+
+        # Find all placeholders in the text
+        import re
+
+        pattern = r'\[REDACTED:[A-Z_]+:[a-f0-9]{6}\]'
+        placeholders = re.findall(pattern, sanitized_text)
+
+        result = sanitized_text
+        for placeholder in placeholders:
+            record = await self._mapping_store.get_by_placeholder(placeholder)
+            if record is not None:
+                result = result.replace(placeholder, record.original_value)
+
         return result

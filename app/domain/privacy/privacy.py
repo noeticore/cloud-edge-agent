@@ -61,11 +61,66 @@ class Sanitizer(ABC):
     """Sanitize (redact) sensitive information from text."""
 
     @abstractmethod
-    async def sanitize(self, text: str, entities: list[SensitiveEntity]) -> SanitizeResult:
+    async def sanitize(
+        self,
+        text: str,
+        entities: list[SensitiveEntity],
+        session_id: str = "",
+    ) -> SanitizeResult:
         """Replace sensitive entities with placeholders."""
         ...
 
     @abstractmethod
     async def restore(self, sanitized_text: str, mapping: dict[str, str]) -> str:
         """Restore original values from placeholder mapping."""
+        ...
+
+
+# ---------------------------------------------------------------------------
+# Cross-session sanitization mapping
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class SanitizationMappingRecord:
+    """A persistent sanitization mapping for cross-session reuse.
+
+    Attributes:
+        placeholder: the placeholder string, e.g. [REDACTED:PHONE:abc123].
+        original_value: the real value that was replaced.
+        entity_type: PHONE, EMAIL, ID_CARD, ADDRESS, etc.
+        created_at: unix timestamp when first created.
+        usage_count: how many times this mapping has been used.
+        session_ids: list of session IDs that used this mapping.
+    """
+
+    placeholder: str
+    original_value: str
+    entity_type: str
+    created_at: float = 0.0
+    usage_count: int = 0
+    session_ids: list[str] = field(default_factory=list)
+
+
+class SanitizationMappingStore(ABC):
+    """Abstract storage for cross-session sanitization mappings."""
+
+    @abstractmethod
+    async def get_by_original(self, original_value: str) -> SanitizationMappingRecord | None:
+        """Look up an existing mapping by original value."""
+        ...
+
+    @abstractmethod
+    async def get_by_placeholder(self, placeholder: str) -> SanitizationMappingRecord | None:
+        """Look up an existing mapping by placeholder."""
+        ...
+
+    @abstractmethod
+    async def save(self, record: SanitizationMappingRecord) -> None:
+        """Save or update a mapping record."""
+        ...
+
+    @abstractmethod
+    async def load_all(self) -> dict[str, SanitizationMappingRecord]:
+        """Load all mappings as {placeholder: record}."""
         ...

@@ -4,12 +4,17 @@ Implements 4 modes:
   Mode A: Direct Local    — user → edge agent → answer
   Mode B: Direct Cloud    — user → cloud agent → answer
   Mode C: Sanitize-Cloud  — user → sanitize → cloud → restore → answer
-  Mode D: Sketch-Refine   — edge sketch → cloud refine → edge restore
+  Mode D: Sketch-Refine   — edge sketch → cloud refine → edge restore (reserved)
+
+Routing matrix:
+  Simple + S1/S2/S3 → Mode A (local)
+  Complex + S1      → Mode B (cloud)
+  Complex + S2/S3   → Mode C (sanitize-cloud)
 """
 
 import json
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from app.core.logger.logger import get_logger
 from app.domain.agent.agent import BaseAgent
@@ -74,26 +79,28 @@ class OrchestratorResult:
     privacy_detection: PrivacyDetection
     latency_ms: float
     tokens_used: int = 0
+    sanitized_query: str = ""
+    restore_mapping: dict[str, str] = field(default_factory=dict)
 
 
 # ---------------------------------------------------------------------------
 # Collaborative Orchestrator
 # ---------------------------------------------------------------------------
 
+
 class CollaborativeOrchestrator:
     """The main orchestrator that coordinates edge + cloud agents.
 
     Flow:
     1. Analyze task complexity (edge SLM) — cheap, always available
-    2. If low complexity (L1-L2) → skip privacy detection, route to Edge
-    3. If high complexity (L3-L5) → run privacy detection → route matrix
+    2. Run privacy detection (regex → keywords → SLM)
+    3. Route based on privacy × complexity matrix
     4. Execute the chosen collaborate mode
 
-    Privacy detection is deferred for low-complexity tasks because:
-    - The routing matrix always sends low-complexity tasks to Edge regardless
-      of privacy level (S1/S2/S3 low → Edge).
-    - Running NER + SLM judge is wasteful and fragile when data never leaves
-      the local device.
+    For low-complexity tasks, privacy detection is still run but
+    the routing always selects local mode regardless of result.
+    This ensures we correctly identify sensitive data for storage
+    routing (original vs sanitized content).
     """
 
     def __init__(
@@ -104,6 +111,7 @@ class CollaborativeOrchestrator:
         cloud_agent: BaseAgent,
         privacy_detector: PrivacyDetector,
         sanitizer: Sanitizer,
+        edge_available: bool = True,
     ) -> None:
         self._edge = edge_client
         self._cloud = cloud_client
@@ -111,51 +119,30 @@ class CollaborativeOrchestrator:
         self._cloud_agent = cloud_agent
         self._detector = privacy_detector
         self._sanitizer = sanitizer
+        self._edge_available = edge_available
 
     async def process(
-        self, query: str, session_id: str
+        self,
+        query: str,
+        session_id: str,
+        context_messages: list[dict[str, str]] | None = None,
     ) -> OrchestratorResult:
-        """Process a user query through the full routing pipeline."""
+        """Process a user query through the full routing pipeline.
+
+        Args:
+            query: user input text.
+            session_id: current session identifier.
+            context_messages: optional conversation history for context.
+        """
         start_time = time.monotonic()
 
-        # Step 1: Complexity analysis first (uses edge model, always available)
+        # Step 1: Complexity analysis
         complexity = await analyze_complexity(query, self._edge)
 
-        # Step 2: If low complexity → always Edge, skip privacy detection
-        complexity_group = "low" if complexity.value <= 2 else "high"
-        if complexity_group == "low":
-            routing = route(
-                privacy_level=PrivacyLevel.NA,
-                complexity=complexity,
-            )
-
-            logger.info(
-                "orchestrator_routing",
-                session_id=session_id,
-                mode=routing.mode.value,
-                privacy="N/A",
-                complexity=complexity.value,
-            )
-
-            answer = await self._mode_direct_local(query)
-
-            elapsed_ms = (time.monotonic() - start_time) * 1000
-            return OrchestratorResult(
-                answer=answer,
-                mode=routing.mode,
-                routing=routing,
-                privacy_detection=PrivacyDetection(
-                    level=PrivacyLevel.NA,
-                    confidence=1.0,
-                    reason="low complexity, local only, privacy detection skipped",
-                ),
-                latency_ms=round(elapsed_ms, 1),
-            )
-
-        # Step 3: High complexity → may go cloud, run privacy detection
+        # Step 2: Privacy detection (always run for correct storage routing)
         privacy_result = await self._detector.detect(query)
 
-        # Step 4: Route based on privacy and complexity
+        # Step 3: Route based on privacy × complexity
         routing = route(
             privacy_level=privacy_result.level,
             complexity=complexity,
@@ -169,12 +156,31 @@ class CollaborativeOrchestrator:
             complexity=complexity.value,
         )
 
+        # Step 4: Edge-unavailable protection
+        # If edge is down and the task would go to edge, or if it's a
+        # privacy-sensitive task that should stay local, block cloud access.
+        if not self._edge_available and self._requires_local(routing, privacy_result):
+            answer = (
+                "抱歉，当前本地 LLM 服务不可用，无法安全处理此查询。\n"
+                "请先启动本地 LLM 服务（运行 scripts/start_local_llm.bat），然后再试。\n"
+                "这是为了保护您的隐私数据不被发送到云端。"
+            )
+            elapsed_ms = (time.monotonic() - start_time) * 1000
+            return OrchestratorResult(
+                answer=answer,
+                mode=CollaborateMode.DIRECT_LOCAL,
+                routing=routing,
+                privacy_detection=privacy_result,
+                latency_ms=round(elapsed_ms, 1),
+            )
+
         # Step 5: Execute mode
-        answer = await self._execute_mode(
+        answer, sanitized_query, mapping = await self._execute_mode(
             mode=routing.mode,
             query=query,
             privacy_result=privacy_result,
             session_id=session_id,
+            context_messages=context_messages,
         )
 
         elapsed_ms = (time.monotonic() - start_time) * 1000
@@ -185,7 +191,22 @@ class CollaborativeOrchestrator:
             routing=routing,
             privacy_detection=privacy_result,
             latency_ms=round(elapsed_ms, 1),
+            sanitized_query=sanitized_query,
+            restore_mapping=mapping,
         )
+
+    def _requires_local(
+        self, routing: RoutingResult, privacy: PrivacyDetection
+    ) -> bool:
+        """Check if the task must be processed locally."""
+        # If routing says local, it must be local
+        if routing.mode == CollaborateMode.DIRECT_LOCAL:
+            return True
+        # If privacy is S3 and we'd need cloud, block it when edge is down
+        # (sanitize-cloud requires edge for restore)
+        if privacy.level == PrivacyLevel.S3:
+            return True
+        return False
 
     async def _execute_mode(
         self,
@@ -193,27 +214,53 @@ class CollaborativeOrchestrator:
         query: str,
         privacy_result: PrivacyDetection,
         session_id: str,
-    ) -> str:
-        """Dispatch to the appropriate collaborate mode."""
+        context_messages: list[dict[str, str]] | None = None,
+    ) -> tuple[str, str, dict[str, str]]:
+        """Dispatch to the appropriate collaborate mode.
+
+        Returns:
+            (answer, sanitized_query, restore_mapping)
+        """
         if mode == CollaborateMode.DIRECT_LOCAL:
-            return await self._mode_direct_local(query)
+            answer = await self._mode_direct_local(query, context_messages)
+            return answer, query, {}
+
         elif mode == CollaborateMode.DIRECT_CLOUD:
-            return await self._mode_direct_cloud(query)
+            answer = await self._mode_direct_cloud(query, context_messages)
+            return answer, query, {}
+
         elif mode == CollaborateMode.SANITIZE_CLOUD:
-            return await self._mode_sanitize_cloud(query, privacy_result)
+            answer, sanitized, mapping = await self._mode_sanitize_cloud(
+                query, privacy_result, session_id, context_messages
+            )
+            return answer, sanitized, mapping
+
         elif mode == CollaborateMode.SKETCH_REFINE:
-            return await self._mode_sketch_refine(query, privacy_result)
+            answer, sanitized, mapping = await self._mode_sketch_refine(
+                query, privacy_result, session_id
+            )
+            return answer, sanitized, mapping
+
         else:
-            return await self._mode_direct_local(query)
+            answer = await self._mode_direct_local(query, context_messages)
+            return answer, query, {}
 
     # --- Mode A: Direct Local ---
-    async def _mode_direct_local(self, query: str) -> str:
+    async def _mode_direct_local(
+        self,
+        query: str,
+        context_messages: list[dict[str, str]] | None = None,
+    ) -> str:
         """Local execution via edge agent — supports tool calls."""
         result = await self._edge_agent.run(query)
         return result.answer
 
     # --- Mode B: Direct Cloud ---
-    async def _mode_direct_cloud(self, query: str) -> str:
+    async def _mode_direct_cloud(
+        self,
+        query: str,
+        context_messages: list[dict[str, str]] | None = None,
+    ) -> str:
         """Cloud execution via cloud agent — supports tool calls."""
         result = await self._cloud_agent.run(query)
         return result.answer
@@ -223,10 +270,18 @@ class CollaborativeOrchestrator:
         self,
         query: str,
         privacy_result: PrivacyDetection,
-    ) -> str:
-        """Sanitize sensitive data, send to cloud, restore in result."""
-        # Sanitize
-        sanitize_result = await self._sanitizer.sanitize(query, privacy_result.entities)
+        session_id: str,
+        context_messages: list[dict[str, str]] | None = None,
+    ) -> tuple[str, str, dict[str, str]]:
+        """Sanitize sensitive data, send to cloud, restore in result.
+
+        Returns:
+            (restored_answer, sanitized_query, restore_mapping)
+        """
+        # Sanitize the query
+        sanitize_result = await self._sanitizer.sanitize(
+            query, privacy_result.entities, session_id=session_id
+        )
         logger.info(
             "sanitized",
             entities_replaced=sanitize_result.entities_replaced,
@@ -234,8 +289,20 @@ class CollaborativeOrchestrator:
             sanitized_len=len(sanitize_result.sanitized_text),
         )
 
-        # Cloud inference on sanitized text
-        messages = [LLMMessage(role="user", content=sanitize_result.sanitized_text)]
+        # Build messages for cloud with sanitized context
+        messages: list[LLMMessage] = []
+        if context_messages:
+            for msg in context_messages:
+                messages.append(LLMMessage(
+                    role=msg["role"],
+                    content=msg["content"],
+                ))
+        messages.append(LLMMessage(
+            role="user",
+            content=sanitize_result.sanitized_text,
+        ))
+
+        # Cloud inference
         response = await self._cloud.invoke(messages)
 
         # Restore original values in the response
@@ -243,44 +310,26 @@ class CollaborativeOrchestrator:
             response.content, sanitize_result.mapping
         )
 
-        return restored
+        return restored, sanitize_result.sanitized_text, sanitize_result.mapping
 
-    # --- Mode D: Sketch-Refine (PBCR innovation) ---
+    # --- Mode D: Sketch-Refine (Reserved) ---
     async def _mode_sketch_refine(
         self,
         query: str,
         privacy_result: PrivacyDetection,
-    ) -> str:
+        session_id: str,
+    ) -> tuple[str, str, dict[str, str]]:
         """Edge generates a privacy-safe sketch, cloud refines it.
 
-        This is the PBCR innovation: for S3 (confidential) + complex tasks,
-        instead of forcing pure local execution, we use a collaborative approach:
-        1. Edge: sanitize + summarize into a "sketch" (privacy-safe)
-        2. Cloud: refine/expand the sketch with deeper reasoning
-        3. Edge: restore original context in the final answer
+        Reserved for future S3 + complex task handling.
+        Currently falls back to sanitize-cloud.
+
+        Returns:
+            (restored_answer, sanitized_query, restore_mapping)
         """
-        # Step 1: Edge generates a sanitized sketch
-        sanitize_result = await self._sanitizer.sanitize(query, privacy_result.entities)
-
-        sketch_prompt = (
-            f"Based on the following sanitized context, provide a detailed analysis "
-            f"or summary. The original data has been redacted for privacy.\n\n"
-            f"Sanitized context:\n{sanitize_result.sanitized_text}"
+        # TODO: Implement proper Sketch-Refine (Mode D)
+        # For now, fall back to sanitize-cloud
+        logger.info("sketch_refine_fallback", reason="not yet implemented")
+        return await self._mode_sanitize_cloud(
+            query, privacy_result, session_id, context_messages=None
         )
-        messages = [LLMMessage(role="user", content=sketch_prompt)]
-        sketch_response = await self._edge.invoke(messages)
-
-        # Step 2: Cloud refines the sketch
-        refine_prompt = (
-            f"Refine and expand the following analysis with deeper reasoning:\n\n"
-            f"{sketch_response.content}"
-        )
-        messages = [LLMMessage(role="user", content=refine_prompt)]
-        refined_response = await self._cloud.invoke(messages)
-
-        # Step 3: Edge restores context
-        restored = await self._sanitizer.restore(
-            refined_response.content, sanitize_result.mapping
-        )
-
-        return restored

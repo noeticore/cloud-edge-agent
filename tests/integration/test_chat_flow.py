@@ -81,6 +81,10 @@ def _make_chat_service(
     llm_responses: list[str],
 ) -> tuple[ChatService, FakeLLMClient]:
     """Wire up a full ChatService with fake LLM for integration testing."""
+    from app.infrastructure.database.conversation_store import SQLiteConversationStore
+    import tempfile
+    import os
+
     edge_client = FakeLLMClient(llm_responses)
     cloud_client = FakeLLMClient(llm_responses)
 
@@ -91,7 +95,11 @@ def _make_chat_service(
     sanitizer = RegexSanitizer()
 
     session_store = InMemorySessionStore()
-    short_term_memory = InMemoryShortTermStore()
+
+    # Use a temp database for integration tests
+    tmp = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
+    tmp.close()
+    conversation_store = SQLiteConversationStore(db_path=tmp.name)
 
     orchestrator = CollaborativeOrchestrator(
         edge_client=edge_client,
@@ -105,9 +113,8 @@ def _make_chat_service(
     chat_service = ChatService(
         orchestrator=orchestrator,
         session_store=session_store,
-        short_term_memory=short_term_memory,
-        cloud_memory=None,
-        local_memory=None,
+        conversation_store=conversation_store,
+        rag_pipeline=None,
     )
     return chat_service, edge_client
 
@@ -121,17 +128,19 @@ class TestChatMemoryIntegration:
     @pytest.mark.asyncio
     async def test_multi_turn_memory(self) -> None:
         """Agent should remember context from earlier turns."""
-        # New flow: complexity first, SLM skipped for L1-L2.
         # Each chat() call triggers:
-        #   1. Complexity analyzer → JSON
-        #   2. Agent answer (via FakeAgent.run, which calls LLM once)
+        #   1. Complexity analyzer → JSON (uses edge_client)
+        #   2. SLM judge (privacy) → JSON (uses slm_client = edge_client)
+        #   3. Orchestrator mode → text response
         service, llm = _make_chat_service(
             llm_responses=[
-                # Turn 1: complexity=L2 → low → skip privacy, direct local
+                # Turn 1
                 '{"level": "L2"}',
+                '{"level": "S1", "confidence": 0.9, "reason": "safe"}',
                 "Nice to meet you, Alice!",
-                # Turn 2: complexity=L2 → low → skip privacy, direct local
+                # Turn 2
                 '{"level": "L2"}',
+                '{"level": "S1", "confidence": 0.9, "reason": "safe"}',
                 "Your name is Alice.",
             ]
         )
@@ -152,8 +161,10 @@ class TestChatMemoryIntegration:
         """Different sessions should not share memory."""
         responses = [
             '{"level": "L2"}',
+            '{"level": "S1", "confidence": 0.9, "reason": "safe"}',
             "Got it",
             '{"level": "L2"}',
+            '{"level": "S1", "confidence": 0.9, "reason": "safe"}',
             "I don't know",
         ]
         service, _ = _make_chat_service(llm_responses=responses)
@@ -171,11 +182,10 @@ class TestChatOrchestratorIntegration:
     @pytest.mark.asyncio
     async def test_privacy_routing_sanitizes_pii(self) -> None:
         """PII-heavy queries should be routed through sanitize-cloud mode."""
-        # New flow: complexity first (L3 to trigger privacy), then cloud answer.
-        # Regex catches phone number → S2 → route(S2, L3) → Sanitize Cloud.
-        service, _ = _make_chat_service(
+        service, llm = _make_chat_service(
             llm_responses=[
-                '{"level": "L3"}',
+                '{"level": "L4"}',
+                '{"level": "S2", "confidence": 0.95, "reason": "phone number"}',
                 "Sure, I can help.",
             ]
         )

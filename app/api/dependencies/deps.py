@@ -10,14 +10,11 @@ from dataclasses import dataclass
 from app.core.config.settings import Settings, get_settings
 from app.domain.agent.agent import AgentRole
 from app.domain.agent.react_agent import ReActAgent
-from app.domain.memory.memory import MemoryStore
 from app.domain.tool.registry import ToolRegistry
 from app.infrastructure.cache.cache import InMemoryCache
-from app.infrastructure.database.session_repository import (
-    InMemorySessionStore,
-    InMemoryShortTermStore,
-)
-from app.infrastructure.database.sqlite_store import SQLiteMemoryStore
+from app.infrastructure.database.conversation_store import SQLiteConversationStore
+from app.infrastructure.database.mapping_store import SQLiteSanitizationMappingStore
+from app.infrastructure.database.session_repository import InMemorySessionStore
 from app.infrastructure.llm.client_factory import (
     create_cloud_llm_client,
     create_edge_llm_client,
@@ -124,58 +121,30 @@ class AppComponents:
     rag_pipeline: RAGPipeline | None = None
 
 
-def _create_long_term_memory(
+def _create_rag_pipeline(
     settings: Settings,
-) -> MemoryStore | None:
-    """Create Qdrant-backed long-term memory if vector store is configured.
+) -> RAGPipeline | None:
+    """Create RAG pipeline if vector store is available.
 
-    Uses MiniLM for local embeddings (384 dimensions, no API key required).
-    Returns None if initialization fails (graceful degradation).
+    Uses Qdrant as a document store for RAG retrieval.
+    Returns None if vector store is not configured (graceful degradation).
     """
     try:
         from app.infrastructure.rag.minilm_embedder import MiniLMEmbedder
 
-        # Use local MiniLM model for embeddings (runs offline, no API calls)
         embedder = MiniLMEmbedder()
-        store = QdrantMemoryStore(
+        vector_store = QdrantMemoryStore(
             embedder=embedder,
             settings=settings.vector_store,
         )
-        return store
     except Exception as exc:
-        logger.warning("long_term_memory_init_failed", error=str(exc))
-        return None
-
-
-def _create_tool_registry() -> ToolRegistry:
-    """Create a tool registry with all available tools."""
-    registry = ToolRegistry()
-    registry.register(CalculatorTool())
-    registry.register(TimeTool())
-    registry.register(SearchTool())
-    return registry
-
-
-def _create_rag_pipeline(
-    settings: Settings,
-    vector_store: MemoryStore | None,
-) -> RAGPipeline | None:
-    """Create RAG pipeline if vector store is available.
-
-    Returns None if vector store is not configured (graceful degradation).
-    """
-    if vector_store is None:
-        logger.warning("rag_pipeline_skipped", reason="no vector store")
+        logger.warning("rag_vector_store_init_failed", error=str(exc))
         return None
 
     try:
-        # Chunker
         chunker = FixedSizeChunker(chunk_size=512, overlap=64)
-
-        # Retriever (wraps the vector store)
         retriever = MemoryRetriever(store=vector_store)
 
-        # Reranker (uses cloud LLM for better quality)
         reranker_client = OpenAICompatibleClient(
             provider=settings.cloud_llm.provider,
             model_name=settings.cloud_llm.model_name,
@@ -199,6 +168,15 @@ def _create_rag_pipeline(
         return None
 
 
+def _create_tool_registry() -> ToolRegistry:
+    """Create a tool registry with all available tools."""
+    registry = ToolRegistry()
+    registry.register(CalculatorTool())
+    registry.register(TimeTool())
+    registry.register(SearchTool())
+    return registry
+
+
 def create_components() -> AppComponents:
     """Factory that wires up all application components.
 
@@ -209,6 +187,11 @@ def create_components() -> AppComponents:
     - Cloud: DeepSeek API at https://api.deepseek.com/v1
     - Both use the same OpenAICompatibleClient interface
     - If Ollama unavailable, edge falls back to cloud
+
+    Storage architecture:
+    - All conversations: SQLite (local only, dual-content)
+    - Sanitization mappings: SQLite (cross-session reuse)
+    - RAG documents: Qdrant (cloud, for retrieval only)
     """
     settings = get_settings()
 
@@ -223,16 +206,12 @@ def create_components() -> AppComponents:
     )
 
     # === Unified LLM Interface ===
-    # Both edge and cloud use OpenAICompatibleClient
-    # Only difference is base_url (local vs remote API)
     cloud_client = create_cloud_llm_client(settings.cloud_llm)
 
     if edge_available:
-        # Local Ollama service
         edge_client = create_edge_llm_client(settings.edge_llm)
         logger.info("using_edge_llm", model=settings.edge_llm.model_name)
     else:
-        # Fallback: use cloud for edge operations too
         edge_client = cloud_client
         logger.warning(
             "edge_unavailable_using_cloud",
@@ -243,7 +222,7 @@ def create_components() -> AppComponents:
     # Tools
     tool_registry = _create_tool_registry()
 
-    # Agents (both use the same interface)
+    # Agents
     edge_agent = ReActAgent(
         llm_client=edge_client,
         tool_registry=tool_registry,
@@ -255,16 +234,9 @@ def create_components() -> AppComponents:
         role=AgentRole.CLOUD,
     )
 
-    # Privacy engine — SLM judge must NEVER use cloud.
-    # The SLM judge decides whether data is safe to send to cloud,
-    # so sending data to cloud for that decision defeats the purpose.
-    #
-    # Fallback chain:
-    #   1. Dedicated SLM model (e.g. qwen2.5:1.5b) — if pulled in Ollama
-    #   2. Edge main model (e.g. qwen2.5:7b) — reuse existing model
-    #   3. No-op (conservative S2 default) — privacy engine handles this
+    # === Privacy Engine ===
+    # SLM judge must NEVER use cloud — it decides if data can go to cloud.
     if edge_available:
-        # Check if the dedicated SLM model exists in Ollama
         slm_model = _resolve_slm_model(settings)
         slm_client = OpenAICompatibleClient(
             provider="ollama",
@@ -276,36 +248,34 @@ def create_components() -> AppComponents:
         )
         logger.info("slm_client_created", model=slm_model)
     else:
-        # Edge unavailable — privacy engine will default to S2 without SLM
         slm_client = None
         logger.warning("slm_unavailable_edge_down")
 
     privacy_detector = ThreeLayerPrivacyDetector(slm_client=slm_client)
-    sanitizer = RegexSanitizer()
 
-    # === Memory Architecture ===
-    # Short-term: in-memory (current session, fast)
-    # Cloud: Qdrant (S1 conversations, vector search)
-    # Local: SQLite (S2/S3 conversations, never leaves device)
+    # Sanitization mapping store (cross-session reuse)
+    db_path = "data/local_memory.db"
+    mapping_store = SQLiteSanitizationMappingStore(db_path=db_path)
+    sanitizer = RegexSanitizer(mapping_store=mapping_store)
+    logger.info("sanitizer_initialized", db_path=db_path)
+
+    # === Storage ===
     session_store = InMemorySessionStore()
-    short_term_memory = InMemoryShortTermStore()
     cache = InMemoryCache()
 
-    # Cloud memory (Qdrant) for S1 conversations
-    cloud_memory = None
+    # Conversation store (all conversations, dual-content)
+    conversation_store = SQLiteConversationStore(db_path=db_path)
+    logger.info("conversation_store_initialized", db_path=db_path)
+
+    # RAG pipeline (Qdrant for document retrieval only)
     rag_pipeline = None
     if qdrant_available:
-        cloud_memory = _create_long_term_memory(settings)
-        rag_pipeline = _create_rag_pipeline(settings, cloud_memory)
-        logger.info("cloud_memory_enabled")
+        rag_pipeline = _create_rag_pipeline(settings)
+        logger.info("rag_pipeline_enabled")
     else:
-        logger.warning("qdrant_unavailable_cloud_memory_disabled")
+        logger.warning("qdrant_unavailable_rag_disabled")
 
-    # Local memory (SQLite) for S2/S3 conversations
-    local_memory = SQLiteMemoryStore(db_path="data/local_memory.db")
-    logger.info("local_memory_enabled", path="data/local_memory.db")
-
-    # Orchestrator
+    # === Orchestrator ===
     orchestrator = CollaborativeOrchestrator(
         edge_client=edge_client,
         cloud_client=cloud_client,
@@ -313,15 +283,14 @@ def create_components() -> AppComponents:
         cloud_agent=cloud_agent,
         privacy_detector=privacy_detector,
         sanitizer=sanitizer,
+        edge_available=edge_available,
     )
 
-    # Chat service with privacy-aware storage routing
+    # === Chat Service ===
     chat_service = ChatService(
         orchestrator=orchestrator,
         session_store=session_store,
-        short_term_memory=short_term_memory,
-        cloud_memory=cloud_memory,   # S1 → Qdrant
-        local_memory=local_memory,   # S2/S3 → SQLite
+        conversation_store=conversation_store,
         rag_pipeline=rag_pipeline,
     )
 

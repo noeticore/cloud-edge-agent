@@ -31,7 +31,12 @@ class TestRouteMatrix:
         assert result.decision == RouteDecision.SANITIZED_CLOUD
         assert result.mode == CollaborateMode.SANITIZE_CLOUD
 
-    def test_s3_any_complexity_routes_to_sketch_refine(self) -> None:
+    def test_s3_high_complexity_routes_to_sanitized_cloud(self) -> None:
         result = route(PrivacyLevel.S3, ComplexityLevel.L5)
-        assert result.decision == RouteDecision.SKETCH_REFINE
-        assert result.mode == CollaborateMode.SKETCH_REFINE
+        assert result.decision == RouteDecision.SANITIZED_CLOUD
+        assert result.mode == CollaborateMode.SANITIZE_CLOUD
+
+    def test_s3_low_complexity_routes_to_edge(self) -> None:
+        result = route(PrivacyLevel.S3, ComplexityLevel.L1)
+        assert result.decision == RouteDecision.EDGE
+        assert result.mode == CollaborateMode.DIRECT_LOCAL

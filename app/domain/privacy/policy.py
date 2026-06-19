@@ -46,14 +46,22 @@ class RoutingResult:
 
 
 # ---------------------------------------------------------------------------
-# Routing matrix (from README §4.4)
+# Routing matrix
 # ---------------------------------------------------------------------------
-#  Privacy | Complexity | Route
-#  S1      | L1-L2      | Edge
-#  S1      | L3-L5      | Cloud
-#  S2      | L1-L2      | Edge
-#  S2      | L3-L5      | Sanitized Cloud
-#  S3      | Any        | Edge
+#  Privacy | Complexity | Route            | Reason
+#  --------|------------|------------------|--------------------------------
+#  S1      | L1-L2      | Edge             | Safe + simple → local
+#  S1      | L3-L5      | Cloud            | Safe + complex → cloud for quality
+#  S2      | L1-L2      | Edge             | Sensitive + simple → local
+#  S2      | L3-L5      | Sanitized Cloud  | Sensitive + complex → sanitize then cloud
+#  S3      | L1-L2      | Edge             | Confidential + simple → local
+#  S3      | L3-L5      | Sanitized Cloud  | Confidential + complex → sanitize then cloud
+#  NA      | L1-L2      | Edge             | Unknown + simple → local (conservative)
+#  NA      | L3-L5      | Cloud            | Unknown + complex → cloud (no PII detected)
+#
+# Note: S3 + complex was originally SKETCH_REFINE (Mode D).
+# For now, S3 uses the same sanitize-cloud strategy as S2.
+# SKETCH_REFINE is reserved for future implementation.
 
 ROUTE_MATRIX: dict[tuple[PrivacyLevel, str], RouteDecision] = {
     (PrivacyLevel.S1, "low"): RouteDecision.EDGE,
@@ -61,7 +69,9 @@ ROUTE_MATRIX: dict[tuple[PrivacyLevel, str], RouteDecision] = {
     (PrivacyLevel.S2, "low"): RouteDecision.EDGE,
     (PrivacyLevel.S2, "high"): RouteDecision.SANITIZED_CLOUD,
     (PrivacyLevel.S3, "low"): RouteDecision.EDGE,
-    (PrivacyLevel.S3, "high"): RouteDecision.SKETCH_REFINE,  # PBCR innovation
+    (PrivacyLevel.S3, "high"): RouteDecision.SANITIZED_CLOUD,
+    (PrivacyLevel.NA, "low"): RouteDecision.EDGE,
+    (PrivacyLevel.NA, "high"): RouteDecision.CLOUD,
 }
 
 _DECISION_TO_MODE = {
