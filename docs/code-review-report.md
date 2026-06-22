@@ -1,8 +1,36 @@
 # CloudEdgeAgent 代码审查报告
 
-> 审查日期：2026-06-18 | 审查范围：全项目 | 版本：v0.1.0
+> 审查日期：2026-06-18 | **更新日期：2026-06-22** | 审查范围：全项目 | 版本：v2.0
 >
 > **项目定位**：大学生课程项目 — 目标为功能完整、可演示、PPT 有料。性能优化和生产级稳定性不在本期范围内。
+
+---
+
+## ⚡ 状态更新 (2026-06-22)
+
+截至 2026-06-22，代码审查报告中发现的**核心问题已全部修复**，阶段一和阶段二的大部分任务已完成：
+
+| 任务 | 状态 | 说明 |
+|------|:---:|------|
+| Task 1: Agent 接入 Orchestrator | ✅ | Orchestrator 通过 ReActAgent 执行，支持工具调用 |
+| Task 2: RAG 管道串联 + 文档 API | ✅ | RAGPipeline 封装完成，文档上传/搜索 API 可用 |
+| Task 3: CLI 复用 ChatService | ✅ | CLI 薄壳化，复用 ChatService.chat() |
+| Task 4: SSE Streaming 端点 | ✅ | POST /api/v1/chat/stream 可用 |
+| Task 5: 全局异常处理 | ✅ | BaseAppException + catch-all handler |
+| Task 6: 演示数据准备 | ⬜ | 待完成 |
+| Task 7: Sketch-Refine 效果增强 | ⚠️ | Mode D 仍 fallback 到 Mode C |
+| Task 8: 长时记忆接入 | ✅ | 跨会话记忆：SQLite 关键词搜索 + 最近对话 |
+| Task 9: 多轮对话上下文优化 | ✅ | 滑动窗口 + 上下文长度限制 |
+| Task 10: API 文档页面美化 | ⬜ | 待完成 |
+
+**额外完成的工作**：
+- **前端 (Vue 3 + Naive UI)** — 4 个页面：对话、文档管理、系统状态、历史会话
+- **Qdrant 启动时初始化** — 避免首次查询延迟
+- **MiniLM 离线加载** — HuggingFace 连接失败时 fallback 到本地缓存
+- **LLM Reranker 批量评分** — 单次 LLM 调用评分所有文档
+- **隐私检测优化** — raw_query 参数避免 enriched query 误触
+- **Agent 输出解析增强** — 容错处理空 Action、多行 Final Answer、幻觉工具名
+- **SQLite 双内容存储** — 原始 + 脱敏内容持久化
 
 ---
 
