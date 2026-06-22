@@ -319,7 +319,11 @@ class ChatService:
             await asyncio.sleep(0.02)
 
         # Signal completion
-        yield json.dumps({"type": "done"})
+        yield json.dumps({
+            "type": "done",
+            "answer": answer,
+            "latency_ms": result.latency_ms,
+        }, ensure_ascii=False)
 
         logger.info(
             "chat_stream_complete",
@@ -327,6 +331,29 @@ class ChatService:
             mode=processing_mode,
             latency_ms=result.latency_ms,
         )
+
+    async def get_sessions(self) -> list[dict]:
+        """List all conversation sessions with summary info."""
+        return await self._conversations.get_sessions()
+
+    async def get_session_messages(self, session_id: str) -> list[dict]:
+        """Get all messages for a session as API-friendly dicts."""
+        entries = await self._conversations.get_history(
+            session_id, limit=200, content_type="original"
+        )
+        return [
+            {
+                "entry_id": e.entry_id,
+                "session_id": e.session_id,
+                "role": e.role,
+                "content": e.original_content,
+                "privacy_level": e.privacy_level,
+                "processing_mode": e.processing_mode,
+                "has_sensitive_data": e.has_sensitive_data,
+                "timestamp": e.timestamp,
+            }
+            for e in entries
+        ]
 
     @staticmethod
     def _enrich_query(

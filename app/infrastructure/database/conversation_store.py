@@ -296,6 +296,44 @@ class SQLiteConversationStore(ConversationStore):
             for row in rows
         ]
 
+    async def get_sessions(self) -> list[dict]:
+        """List all unique sessions with summary info.
+
+        Returns:
+            list of dicts with session_id, last_active, message_count, preview.
+        """
+        with sqlite3.connect(self._db_path) as conn:
+            conn.row_factory = sqlite3.Row
+            cursor = conn.execute(
+                """SELECT session_id,
+                          MAX(timestamp) AS last_active,
+                          COUNT(*) AS message_count
+                   FROM conversations
+                   GROUP BY session_id
+                   ORDER BY last_active DESC"""
+            )
+            sessions = []
+            for row in cursor.fetchall():
+                preview_cursor = conn.execute(
+                    """SELECT original_content FROM conversations
+                      WHERE session_id = ? AND role = 'user'
+                      ORDER BY timestamp ASC LIMIT 1""",
+                    (row["session_id"],),
+                )
+                preview_row = preview_cursor.fetchone()
+                preview = (
+                    preview_row["original_content"][:80] if preview_row else ""
+                )
+                sessions.append(
+                    {
+                        "session_id": row["session_id"],
+                        "last_active": row["last_active"],
+                        "message_count": row["message_count"],
+                        "preview": preview,
+                    }
+                )
+            return sessions
+
     async def clear(self, session_id: str | None = None) -> None:
         """Clear conversations."""
         with sqlite3.connect(self._db_path) as conn:

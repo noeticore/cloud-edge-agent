@@ -47,6 +47,28 @@ async def chat(request: Request, body: ChatRequest) -> ChatResponseSchema:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
+@router.get("/sessions")
+async def list_sessions(request: Request):
+    """List all conversation sessions with summary info."""
+    chat_service = request.app.state.components.chat_service
+    try:
+        sessions = await chat_service.get_sessions()
+        return {"sessions": sessions}
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@router.get("/sessions/{session_id}/messages")
+async def get_session_messages(request: Request, session_id: str):
+    """Get all messages for a specific session."""
+    chat_service = request.app.state.components.chat_service
+    try:
+        messages = await chat_service.get_session_messages(session_id)
+        return {"messages": messages}
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
 @router.post("/stream")
 async def chat_stream(request: Request, body: ChatRequest):
     """Stream response tokens via Server-Sent Events (SSE).
