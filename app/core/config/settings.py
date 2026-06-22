@@ -24,7 +24,7 @@ class EdgeLLMSettings(BaseSettings):
         default="http://localhost:11434/v1", description="Ollama OpenAI-compatible URL"
     )
     model_name: str = Field(
-        default="qwen2.5:7b-instruct", description="Local model name"
+        default="qwen2.5:7b", description="Local model name"
     )
     api_key: str = Field(default="ollama", description="API key (ollama uses dummy key)")
     temperature: float = Field(default=0.7, ge=0.0, le=2.0)

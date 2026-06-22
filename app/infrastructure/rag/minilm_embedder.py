@@ -30,30 +30,55 @@ class MiniLMEmbedder(Embedder):
         self._model = None
 
     def _ensure_model(self):
-        """Lazily load the sentence-transformers model."""
+        """Lazily load the sentence-transformers model.
+
+        Tries online first; if the network is unavailable (e.g. behind a
+        firewall) and the model is already cached locally, falls back to
+        offline mode automatically.
+        """
         if self._model is None:
             try:
                 from sentence_transformers import SentenceTransformer
-
-                logger.info("minilm_loading", model=self._model_name)
-                self._model = SentenceTransformer(self._model_name)
-                # get_sentence_embedding_dimension was renamed to get_embedding_dimension
-                get_dim = getattr(
-                    self._model,
-                    "get_embedding_dimension",
-                    getattr(self._model, "get_sentence_embedding_dimension", None),
-                )
-                dimension = get_dim() if get_dim else 384
-                logger.info(
-                    "minilm_loaded",
-                    model=self._model_name,
-                    dimension=dimension,
-                )
             except ImportError:
                 raise ImportError(
                     "sentence-transformers is required for MiniLMEmbedder. "
                     "Install it with: pip install sentence-transformers"
                 )
+
+            logger.info("minilm_loading", model=self._model_name)
+            try:
+                self._model = SentenceTransformer(self._model_name)
+            except Exception as exc:
+                # Network failure — try offline mode with cached model
+                logger.warning(
+                    "minilm_online_load_failed",
+                    model=self._model_name,
+                    error=str(exc),
+                    hint="Retrying with local_files_only (cached model)",
+                )
+                try:
+                    self._model = SentenceTransformer(
+                        self._model_name, local_files_only=True
+                    )
+                except Exception as offline_exc:
+                    raise RuntimeError(
+                        f"Failed to load embedder model '{self._model_name}'. "
+                        f"Online error: {exc}. Offline error: {offline_exc}. "
+                        "Download the model once with a working network, or "
+                        "set HF_HUB_OFFLINE=1 after caching."
+                    ) from offline_exc
+
+            get_dim = getattr(
+                self._model,
+                "get_embedding_dimension",
+                getattr(self._model, "get_sentence_embedding_dimension", None),
+            )
+            dimension = get_dim() if get_dim else 384
+            logger.info(
+                "minilm_loaded",
+                model=self._model_name,
+                dimension=dimension,
+            )
 
     async def embed(self, text: str) -> list[float]:
         """Return embedding vector for a single text."""

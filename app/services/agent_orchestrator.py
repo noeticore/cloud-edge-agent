@@ -13,6 +13,7 @@ Routing matrix:
 """
 
 import json
+import re
 import time
 from dataclasses import dataclass, field
 
@@ -58,7 +59,17 @@ async def analyze_complexity(text: str, edge_client: LLMClient) -> ComplexityLev
     messages = [LLMMessage(role="user", content=_COMPLEXITY_PROMPT.format(text=text))]
     try:
         response = await edge_client.invoke(messages)
-        parsed = json.loads(response.content.strip())
+        content = response.content.strip()
+        # Try direct JSON parse first
+        try:
+            parsed = json.loads(content)
+        except json.JSONDecodeError:
+            # Extract JSON object from markdown code blocks or extra text
+            match = re.search(r"\{.*\}", content, re.DOTALL)
+            if match:
+                parsed = json.loads(match.group())
+            else:
+                raise
         return ComplexityLevel[parsed["level"]]
     except Exception as exc:
         logger.warning("complexity_analysis_failed", error=str(exc))
@@ -126,21 +137,29 @@ class CollaborativeOrchestrator:
         query: str,
         session_id: str,
         context_messages: list[dict[str, str]] | None = None,
+        raw_query: str | None = None,
     ) -> OrchestratorResult:
         """Process a user query through the full routing pipeline.
 
         Args:
-            query: user input text.
+            query: enriched query (with conversation history and RAG context).
+                   Used for complexity analysis and agent execution.
             session_id: current session identifier.
             context_messages: optional conversation history for context.
+            raw_query: original user input without enrichment.
+                       Used for privacy detection to avoid false positives
+                       from conversation history. Defaults to ``query``.
         """
         start_time = time.monotonic()
 
-        # Step 1: Complexity analysis
+        # Privacy target: use raw_query to avoid false positives from history
+        privacy_target = raw_query if raw_query is not None else query
+
+        # Step 1: Complexity analysis (enriched query gives better context)
         complexity = await analyze_complexity(query, self._edge)
 
-        # Step 2: Privacy detection (always run for correct storage routing)
-        privacy_result = await self._detector.detect(query)
+        # Step 2: Privacy detection on RAW user input only
+        privacy_result = await self._detector.detect(privacy_target)
 
         # Step 3: Route based on privacy × complexity
         routing = route(

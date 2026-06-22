@@ -145,6 +145,51 @@ class SQLiteConversationStore(ConversationStore):
 
         return entries
 
+    async def get_recent(
+        self, limit: int = 10, content_type: str = "original"
+    ) -> list[ConversationEntry]:
+        """Get most recent conversation entries across ALL sessions.
+
+        Useful for cross-session context retrieval (e.g. user shared
+        contact info in a previous session and asks about it now).
+
+        Args:
+            limit: max entries to return.
+            content_type: "original" for local, "sanitized" for cloud.
+        """
+        with sqlite3.connect(self._db_path) as conn:
+            conn.row_factory = sqlite3.Row
+            cursor = conn.execute(
+                """
+                SELECT id, session_id, role, original_content, sanitized_content,
+                       restored_content, privacy_level, processing_mode,
+                       has_sensitive_data, timestamp
+                FROM conversations
+                ORDER BY timestamp DESC
+                LIMIT ?
+                """,
+                (limit,),
+            )
+            rows = cursor.fetchall()
+
+        entries = []
+        for row in reversed(rows):
+            entries.append(
+                ConversationEntry(
+                    entry_id=row["id"],
+                    session_id=row["session_id"],
+                    role=row["role"],
+                    original_content=row["original_content"],
+                    sanitized_content=row["sanitized_content"] or "",
+                    restored_content=row["restored_content"] or "",
+                    privacy_level=row["privacy_level"] or "NA",
+                    processing_mode=row["processing_mode"] or "direct_local",
+                    has_sensitive_data=bool(row["has_sensitive_data"]),
+                    timestamp=row["timestamp"],
+                )
+            )
+        return entries
+
     async def get_context_messages(
         self,
         session_id: str,

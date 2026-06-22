@@ -92,7 +92,9 @@ class ChatService:
             content_type="original",  # Default to original; orchestrator handles mode
         )
 
-        # Also get RAG context if available
+        # Retrieve context from two sources:
+        # 1. RAG — vector similarity search on Qdrant (external knowledge)
+        # 2. Local conversation history — keyword search on SQLite (cross-session)
         rag_context = ""
         if self._rag is not None:
             try:
@@ -104,14 +106,55 @@ class ChatService:
             except Exception as exc:
                 logger.warning("rag_retrieval_failed", error=str(exc))
 
+        # Also search local conversation store for relevant history.
+        # Two strategies combined:
+        #   1. Keyword search — finds semantically related past conversations
+        #   2. Recent history — pulls the latest entries across all sessions,
+        #      so the agent always has access to recently shared info
+        local_context = ""
+        try:
+            local_results = await self._conversations.search(
+                query=query, session_id=None, top_k=3
+            )
+            # Also grab recent entries across all sessions
+            recent_entries = await self._conversations.get_recent(
+                limit=10, content_type="original"
+            )
+
+            # Merge and deduplicate by entry_id
+            seen: set[str] = set()
+            merged: list = []
+            for entry in local_results + recent_entries:
+                if entry.entry_id not in seen:
+                    seen.add(entry.entry_id)
+                    merged.append(entry)
+
+            if merged:
+                local_context = "\n".join(
+                    f"- [{e.role}] {e.original_content[:200]}"
+                    for e in merged[:5]
+                )
+                logger.info(
+                    "local_conversation_context",
+                    query=query[:50],
+                    keyword_hits=len(local_results),
+                    recent_entries=len(recent_entries),
+                    merged=len(merged),
+                )
+        except Exception as exc:
+            logger.warning("local_conversation_search_failed", error=str(exc))
+
         # Build enriched query
-        enriched_query = self._enrich_query(query, context_messages, rag_context)
+        enriched_query = self._enrich_query(
+            query, context_messages, rag_context, local_context
+        )
 
         # Run orchestrator
         result: OrchestratorResult = await self._orchestrator.process(
             query=enriched_query,
             session_id=session_id,
             context_messages=context_messages,
+            raw_query=query,
         )
 
         # Determine privacy and storage details
@@ -189,13 +232,38 @@ class ChatService:
             limit=_MAX_CONTEXT_MESSAGES,
             content_type="original",
         )
-        enriched_query = self._enrich_query(query, context_messages, "")
+
+        # Search local conversation store for cross-session context
+        local_context = ""
+        try:
+            local_results = await self._conversations.search(
+                query=query, session_id=None, top_k=3
+            )
+            recent_entries = await self._conversations.get_recent(
+                limit=10, content_type="original"
+            )
+            seen: set[str] = set()
+            merged: list = []
+            for entry in local_results + recent_entries:
+                if entry.entry_id not in seen:
+                    seen.add(entry.entry_id)
+                    merged.append(entry)
+            if merged:
+                local_context = "\n".join(
+                    f"- [{e.role}] {e.original_content[:200]}"
+                    for e in merged[:5]
+                )
+        except Exception as exc:
+            logger.warning("local_conversation_search_failed", error=str(exc))
+
+        enriched_query = self._enrich_query(query, context_messages, "", local_context)
 
         # Run orchestrator
         result: OrchestratorResult = await self._orchestrator.process(
             query=enriched_query,
             session_id=session_id,
             context_messages=context_messages,
+            raw_query=query,
         )
 
         # Store conversation
@@ -265,11 +333,17 @@ class ChatService:
         query: str,
         context_messages: list[dict[str, str]],
         rag_context: str,
+        local_context: str = "",
     ) -> str:
         """Build enriched query with conversation history and RAG context.
 
         The enriched query gives the LLM access to conversation history
         without requiring it to be in the message window.
+
+        Context sources (in priority order):
+        1. Current session conversation history
+        2. RAG results from vector store (external knowledge)
+        3. Local conversation search results (cross-session history)
         """
         parts = []
 
@@ -290,6 +364,9 @@ class ChatService:
 
         if rag_context:
             parts.append(f"Relevant documents:\n{rag_context}")
+
+        if local_context:
+            parts.append(f"Relevant past conversations:\n{local_context}")
 
         if parts:
             parts.append(f"Current question: {query}")

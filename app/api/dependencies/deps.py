@@ -121,18 +121,25 @@ class AppComponents:
     rag_pipeline: RAGPipeline | None = None
 
 
-def _create_rag_pipeline(
+async def _create_rag_pipeline(
     settings: Settings,
 ) -> RAGPipeline | None:
     """Create RAG pipeline if vector store is available.
 
     Uses Qdrant as a document store for RAG retrieval.
     Returns None if vector store is not configured (graceful degradation).
+
+    Eagerly initializes the Qdrant connection so the first user request
+    doesn't incur connection latency.
     """
     try:
         from app.infrastructure.rag.minilm_embedder import MiniLMEmbedder
 
         embedder = MiniLMEmbedder()
+        # Eagerly load the embedding model — avoids ~9s lag on first query
+        embedder._ensure_model()
+        logger.info("minilm_preloaded")
+
         vector_store = QdrantMemoryStore(
             embedder=embedder,
             settings=settings.vector_store,
@@ -140,6 +147,9 @@ def _create_rag_pipeline(
     except Exception as exc:
         logger.warning("rag_vector_store_init_failed", error=str(exc))
         return None
+
+    # Eagerly connect to Qdrant and verify collection — avoids lag on first request
+    await vector_store.initialize()
 
     try:
         chunker = FixedSizeChunker(chunk_size=512, overlap=64)
@@ -177,7 +187,7 @@ def _create_tool_registry() -> ToolRegistry:
     return registry
 
 
-def create_components() -> AppComponents:
+async def create_components() -> AppComponents:
     """Factory that wires up all application components.
 
     Called once during app startup (lifespan).
@@ -270,7 +280,7 @@ def create_components() -> AppComponents:
     # RAG pipeline (Qdrant for document retrieval only)
     rag_pipeline = None
     if qdrant_available:
-        rag_pipeline = _create_rag_pipeline(settings)
+        rag_pipeline = await _create_rag_pipeline(settings)
         logger.info("rag_pipeline_enabled")
     else:
         logger.warning("qdrant_unavailable_rag_disabled")

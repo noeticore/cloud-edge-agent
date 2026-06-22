@@ -9,8 +9,14 @@ behavior across both interfaces (privacy detection, tool routing, memory).
 """
 
 import asyncio
+import subprocess
 import sys
+import time
+import uuid
+from datetime import datetime
 from pathlib import Path
+
+import httpx
 
 # Add project root to path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -21,6 +27,78 @@ from app.api.dependencies.deps import create_components
 from app.core.logger.logger import get_logger, setup_logging
 
 logger = get_logger("cli")
+
+# ── Ollama auto-start ─────────────────────────────────────────────────────
+OLLAMA_API_URL = "http://localhost:11434"
+OLLAMA_STARTUP_TIMEOUT = 30  # seconds
+
+
+def _ollama_installed() -> bool:
+    """Check if ollama is on the system PATH."""
+    try:
+        result = subprocess.run(
+            ["where", "ollama"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        return result.returncode == 0
+    except Exception:
+        return False
+
+
+def _ollama_running() -> bool:
+    """Check if ollama server is already responding."""
+    try:
+        resp = httpx.get(f"{OLLAMA_API_URL}/api/tags", timeout=3.0)
+        return resp.status_code == 200
+    except Exception:
+        return False
+
+
+def _ensure_ollama_running() -> bool:
+    """Auto-start ollama if installed but not running.
+
+    Returns True if ollama is running (or was started successfully),
+    False otherwise.
+    """
+    if not _ollama_installed():
+        print("  ⚠ Ollama not found on PATH. Install from https://ollama.com/download/windows")
+        print("    Local LLM will be unavailable; falling back to cloud only.")
+        return False
+
+    if _ollama_running():
+        print("  ✓ Ollama is already running")
+        return True
+
+    print("  ⏳ Starting Ollama in background...")
+    try:
+        # Start ollama serve in background (detached process)
+        subprocess.Popen(
+            ["ollama", "serve"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            creationflags=subprocess.CREATE_NO_WINDOW
+            if sys.platform == "win32"
+            else 0,
+        )
+    except Exception as exc:
+        print(f"  ⚠ Failed to start Ollama: {exc}")
+        print("    Run 'scripts/start_local_llm.bat' manually to start it.")
+        return False
+
+    # Wait for ollama to be ready
+    print(f"  ⏳ Waiting for Ollama to be ready (timeout: {OLLAMA_STARTUP_TIMEOUT}s)...")
+    deadline = time.monotonic() + OLLAMA_STARTUP_TIMEOUT
+    while time.monotonic() < deadline:
+        if _ollama_running():
+            print("  ✓ Ollama is now running")
+            return True
+        time.sleep(1.0)
+
+    print(f"  ⚠ Ollama did not start within {OLLAMA_STARTUP_TIMEOUT}s")
+    print("    Run 'scripts/start_local_llm.bat' manually and check for errors.")
+    return False
 
 # ── Banner ──────────────────────────────────────────────────────────────
 BANNER = r"""
@@ -46,13 +124,18 @@ async def main() -> None:
         print("  Copy configs/.env.example to .env and fill in CLOUD_LLM_API_KEY")
         return
 
+    # Auto-start Ollama if installed but not running
+    _ensure_ollama_running()
+
     # Create all components (same as Web API)
     print("  Initializing components...")
-    components = create_components()
+    components = await create_components()
     setup_logging(components.settings.log_level)
 
     chat_service = components.chat_service
-    session_id = "cli-session"
+    # Unique session per CLI run — avoids loading stale conversation history
+    ts = datetime.now().strftime("%Y%m%d-%H%M%S")
+    session_id = f"cli-{ts}-{uuid.uuid4().hex[:4]}"
 
     print(f"  ✓ Edge LLM: {components.settings.edge_llm.provider} / {components.settings.edge_llm.model_name}")
     print(f"  ✓ Cloud LLM: {components.settings.cloud_llm.provider} / {components.settings.cloud_llm.model_name}")

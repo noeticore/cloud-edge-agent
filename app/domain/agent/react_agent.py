@@ -33,7 +33,7 @@ MAX_ITERATIONS = 8
 # ---------------------------------------------------------------------------
 
 _SYSTEM_PROMPT = """\
-You are a helpful AI assistant. You have access to the following tools:
+You are a knowledgeable and helpful AI assistant. You have access to the following tools:
 
 {tool_descriptions}
 
@@ -49,10 +49,14 @@ After receiving a tool result, continue reasoning or give your final answer:
  Final Answer: <your answer to the user>
 
 Rules:
-- You may call multiple tools in sequence before giving a final answer.
 - Always start with a Thought.
-- If you don't need a tool, go directly to Final Answer.
-- Be concise and helpful."""
+- If you already know the answer, give it directly as Final Answer WITHOUT using any tools.
+- Only use tools when you genuinely lack the knowledge (e.g. real-time info, or a very specific fact you are unsure about).
+- If a tool returns no useful results, DO NOT retry. Use your own knowledge to answer instead.
+- Never call the same tool more than once for the same question.
+- Give rich, detailed answers. Include explanations, examples, and context to help the user truly understand the topic.
+- Structure longer answers with clear sections or bullet points when appropriate.
+- Answer in the user's language."""
 
 
 def _build_tool_descriptions(registry: ToolRegistry) -> str:
@@ -97,26 +101,53 @@ def _parse_llm_output(
 
     Returns:
         (thought, action, action_input, final_answer)
+
+    Handles multi-line Final Answer, treats empty Action as no action,
+    and ignores orphaned Action Input lines (Action Input without Action).
     """
     thought = ""
     action = None
     action_input = None
     final_answer = None
 
-    for line in text.strip().split("\n"):
+    lines = text.strip().split("\n")
+    final_answer_lines: list[str] = []
+    in_final_answer = False
+
+    for line in lines:
         stripped = line.strip()
+
         if stripped.startswith("Thought:"):
             thought = stripped[len("Thought:"):].strip()
+            in_final_answer = False
         elif stripped.startswith("Action:"):
-            action = stripped[len("Action:"):].strip()
+            raw = stripped[len("Action:"):].strip()
+            if raw and raw.lower() != "action input:":
+                action = raw
+            in_final_answer = False
         elif stripped.startswith("Action Input:"):
             raw = stripped[len("Action Input:"):].strip()
-            try:
-                action_input = json.loads(raw)
-            except json.JSONDecodeError:
-                action_input = {"query": raw}
+            if action is not None:
+                # Only parse Action Input if we have a valid Action
+                try:
+                    action_input = json.loads(raw)
+                except json.JSONDecodeError:
+                    action_input = {"query": raw}
+            # else: orphaned Action Input — ignore it
+            in_final_answer = False
         elif stripped.startswith("Final Answer:"):
-            final_answer = stripped[len("Final Answer:"):].strip()
+            # Start collecting multi-line final answer
+            first_line = stripped[len("Final Answer:"):].strip()
+            if first_line:
+                final_answer_lines.append(first_line)
+            in_final_answer = True
+        elif in_final_answer:
+            # Continue collecting final answer lines
+            if stripped:
+                final_answer_lines.append(stripped)
+
+    if final_answer_lines:
+        final_answer = "\n".join(final_answer_lines)
 
     return thought, action, action_input, final_answer
 
@@ -125,8 +156,12 @@ def _parse_llm_output(
 # Node functions
 # ---------------------------------------------------------------------------
 
-def _make_agent_node(llm: LLMClient):
-    """Create the 'agent' node — calls LLM and parses the response."""
+def _make_agent_node(llm: LLMClient, registry: ToolRegistry):
+    """Create the 'agent' node — calls LLM and parses the response.
+
+    Validates tool names against the registry to prevent executing
+    malformed output like 'Action Input:' as a tool.
+    """
 
     async def agent_node(state: AgentState) -> dict:
         messages = state["messages"]
@@ -142,6 +177,34 @@ def _make_agent_node(llm: LLMClient):
             total_tokens += response.usage.total_tokens
 
         thought, action, action_input, final_answer = _parse_llm_output(raw_text)
+
+        # Validate tool name — reject malformed output.
+        # Handle "Action: Final Answer" (LLM puts Final Answer after Action:)
+        if action and not registry.has(action):
+            if action.lower() == "final answer":
+                # LLM wrote Action: Final Answer — extract the real answer
+                # from the Action Input or raw text
+                if action_input and isinstance(action_input, dict):
+                    final_answer = action_input.get("answer") or action_input.get("query") or ""
+                if not final_answer:
+                    # Try to extract from raw text after "Final Answer"
+                    for line in raw_text.split("\n"):
+                        stripped = line.strip()
+                        if stripped.lower().startswith("final answer:"):
+                            final_answer = stripped[len("final answer:"):].strip()
+                            break
+                if not final_answer:
+                    final_answer = thought
+                action = None
+                action_input = None
+            else:
+                logger.warning(
+                    "agent_invalid_tool_name",
+                    action=action,
+                    hint="Treating as no-action, falling back to thought",
+                )
+                action = None
+                action_input = None
 
         if final_answer is not None:
             step = AgentStep(
@@ -177,16 +240,22 @@ def _make_agent_node(llm: LLMClient):
                 "total_tokens": total_tokens,
             }
 
-        # No recognizable action or final answer — treat as final
+        # No recognizable action or final answer — treat as final.
+        # Strip empty Action/Action Input lines so the user doesn't see
+        # raw ReAct scaffolding in the answer.
+        clean_answer = raw_text
+        if thought and not action and not final_answer:
+            clean_answer = thought
+
         step = AgentStep(
             thought=thought,
             action="respond",
             action_input={},
-            observation=raw_text,
+            observation=clean_answer,
         )
         return {
             "steps": state["steps"] + [step],
-            "answer": raw_text,
+            "answer": clean_answer,
             "done": True,
             "iteration": iteration + 1,
             "total_tokens": total_tokens,
@@ -196,21 +265,45 @@ def _make_agent_node(llm: LLMClient):
 
 
 def _make_tools_node(registry: ToolRegistry):
-    """Create the 'tools' node — executes the last action."""
+    """Create the 'tools' node — executes the last action.
+
+    Includes a duplicate-call guard: if the agent calls the same tool
+    with the same arguments it already tried, the observation instructs
+    it to use its own knowledge instead of retrying.
+    """
 
     async def tools_node(state: AgentState) -> dict:
         steps = state["steps"]
         last_step = steps[-1]
 
-        logger.info(
-            "langgraph_tool_exec",
-            tool=last_step.action,
-            args=list(last_step.action_input.keys()),
-        )
-        result = await registry.execute(
-            last_step.action, **last_step.action_input
-        )
-        observation = result.output if result.success else f"Error: {result.error}"
+        # Check for duplicate tool calls
+        current_call = (last_step.action, json.dumps(last_step.action_input, sort_keys=True))
+        previous_calls = {
+            (s.action, json.dumps(s.action_input, sort_keys=True))
+            for s in steps[:-1]
+            if s.action not in ("respond",)
+        }
+
+        if current_call in previous_calls:
+            observation = (
+                "You already tried this exact tool call and it didn't help. "
+                "DO NOT call this tool again. Use your own knowledge to give "
+                "a Final Answer now."
+            )
+            logger.info(
+                "langgraph_duplicate_tool_call",
+                tool=last_step.action,
+            )
+        else:
+            logger.info(
+                "langgraph_tool_exec",
+                tool=last_step.action,
+                args=list(last_step.action_input.keys()),
+            )
+            result = await registry.execute(
+                last_step.action, **last_step.action_input
+            )
+            observation = result.output if result.success else f"Error: {result.error}"
 
         # Update the last step with observation
         updated_step = AgentStep(
@@ -268,7 +361,7 @@ def build_react_graph(
     graph = StateGraph(AgentState)
 
     # Add nodes
-    graph.add_node("agent", _make_agent_node(llm))
+    graph.add_node("agent", _make_agent_node(llm, registry))
     graph.add_node("tools", _make_tools_node(registry))
 
     # Entry point

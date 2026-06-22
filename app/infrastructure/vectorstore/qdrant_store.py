@@ -44,6 +44,14 @@ class QdrantMemoryStore(MemoryStore):
         self._timeout = settings.timeout
         self._client: AsyncQdrantClient | None = None
 
+    async def initialize(self) -> None:
+        """Eagerly connect to Qdrant and ensure collection exists.
+
+        Call this during application startup so the first user request
+        doesn't incur connection latency.
+        """
+        await self._ensure_client()
+
     async def _ensure_client(self) -> AsyncQdrantClient:
         """Lazily create the Qdrant client."""
         if self._client is None:

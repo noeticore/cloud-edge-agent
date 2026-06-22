@@ -9,19 +9,16 @@ from app.infrastructure.rag.reranker import LLMReranker
 
 
 class FakeLLM:
-    """Stub LLMClient that returns configurable scores."""
+    """Stub LLMClient that returns a batch score array."""
 
     def __init__(self, scores: list[float]) -> None:
         self._scores = scores
-        self._call_count = 0
 
     async def invoke(self, messages):  # type: ignore[no-untyped-def]
         from app.domain.llm.llm_client import LLMResponse
 
-        score = self._scores[self._call_count % len(self._scores)]
-        self._call_count += 1
         return LLMResponse(
-            content=json.dumps({"score": score}),
+            content=json.dumps(self._scores),
             model="fake",
         )
 
@@ -128,9 +125,11 @@ class TestLLMReranker:
 
             async def invoke(self, messages):  # type: ignore[no-untyped-def]
                 from app.domain.llm.llm_client import LLMResponse
-                # Extract document from the prompt
-                self.captured_doc = messages[0].content.split("Document:\n")[-1]
-                return LLMResponse(content='{"score": 0.5}', model="fake")
+                # Extract document from the batch prompt
+                content = messages[0].content
+                # Format: "Document [0]:\n{doc}"
+                self.captured_doc = content.split("Document [0]:\n")[-1].split("\n\n")[0]
+                return LLMResponse(content='[0.5]', model="fake")
 
         llm = CapturingLLM()
         reranker = LLMReranker(llm, max_doc_chars=500)

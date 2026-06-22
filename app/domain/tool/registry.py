@@ -26,6 +26,10 @@ class ToolRegistry:
         self._tools[tool.name] = tool
         logger.info("tool_registered", tool=tool.name)
 
+    def has(self, name: str) -> bool:
+        """Check if a tool is registered."""
+        return name in self._tools
+
     def get(self, name: str) -> BaseTool:
         """Retrieve a tool by name."""
         if name not in self._tools:

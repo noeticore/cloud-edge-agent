@@ -25,7 +25,7 @@ async def lifespan(app: FastAPI):
     settings = get_settings()
     setup_logging(settings.log_level)
 
-    components = create_components()
+    components = await create_components()
     app.state.components = components
 
     yield
