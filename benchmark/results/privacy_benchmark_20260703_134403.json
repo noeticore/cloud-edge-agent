@@ -1,0 +1,614 @@
+{
+  "metadata": {
+    "benchmark": "privacy-masking-evaluation",
+    "dataset": "Text Anonymization Benchmark (TAB)",
+    "num_samples": 3,
+    "num_samples_with_entities": 3,
+    "total_gt_entities": 162,
+    "num_layers": 3,
+    "elapsed_seconds": 4.8,
+    "avg_ms_per_sample": 1598.72,
+    "timestamp": "2026-07-03T13:44:13.103570+00:00"
+  },
+  "aggregate": {
+    "entity_detection": {
+      "micro_precision": 0.0,
+      "micro_recall": 0.0,
+      "micro_f1": 0.0,
+      "total_gt_entities": 162,
+      "total_pred_entities": 0,
+      "per_type": {
+        "PHONE": {
+          "tp": 0,
+          "fp": 0,
+          "fn": 0,
+          "precision": 0.0,
+          "recall": 0.0,
+          "f1": 0.0,
+          "support": 0
+        },
+        "ID_CARD": {
+          "tp": 0,
+          "fp": 0,
+          "fn": 3,
+          "precision": 0.0,
+          "recall": 0.0,
+          "f1": 0.0,
+          "support": 3
+        },
+        "EMAIL": {
+          "tp": 0,
+          "fp": 0,
+          "fn": 0,
+          "precision": 0.0,
+          "recall": 0.0,
+          "f1": 0.0,
+          "support": 0
+        },
+        "BANK_CARD": {
+          "tp": 0,
+          "fp": 0,
+          "fn": 0,
+          "precision": 0.0,
+          "recall": 0.0,
+          "f1": 0.0,
+          "support": 0
+        },
+        "IP_ADDRESS": {
+          "tp": 0,
+          "fp": 0,
+          "fn": 0,
+          "precision": 0.0,
+          "recall": 0.0,
+          "f1": 0.0,
+          "support": 0
+        },
+        "NAME": {
+          "tp": 0,
+          "fp": 0,
+          "fn": 39,
+          "precision": 0.0,
+          "recall": 0.0,
+          "f1": 0.0,
+          "support": 39
+        },
+        "ADDRESS": {
+          "tp": 0,
+          "fp": 0,
+          "fn": 9,
+          "precision": 0.0,
+          "recall": 0.0,
+          "f1": 0.0,
+          "support": 9
+        },
+        "FINANCIAL": {
+          "tp": 0,
+          "fp": 0,
+          "fn": 0,
+          "precision": 0.0,
+          "recall": 0.0,
+          "f1": 0.0,
+          "support": 0
+        },
+        "MEDICAL": {
+          "tp": 0,
+          "fp": 0,
+          "fn": 0,
+          "precision": 0.0,
+          "recall": 0.0,
+          "f1": 0.0,
+          "support": 0
+        },
+        "MISC": {
+          "tp": 0,
+          "fp": 0,
+          "fn": 111,
+          "precision": 0.0,
+          "recall": 0.0,
+          "f1": 0.0,
+          "support": 111
+        }
+      }
+    },
+    "span_accuracy": {
+      "mean_exact_match": 0.0,
+      "mean_gt_coverage": 0.0
+    },
+    "identifier_type_recall": {
+      "DIRECT": {
+        "count": 6,
+        "matched": 0,
+        "recall": 0.0
+      },
+      "QUASI": {
+        "count": 118,
+        "matched": 0,
+        "recall": 0.0
+      },
+      "NO_MASK": {
+        "count": 38,
+        "matched": 0,
+        "recall": 0.0
+      }
+    },
+    "sanitization": {
+      "avg_entities_replaced_per_sample": 0.0,
+      "avg_length_change_pct": 0.0
+    },
+    "detection_rate_pct": 0.0
+  },
+  "privacy_level_accuracy": {
+    "accuracy": 0.0,
+    "total": 3,
+    "correct": 0,
+    "s1_accuracy": null,
+    "s2plus_recall": 0.0,
+    "false_safe_rate": 1.0,
+    "false_alarm_rate": 0.0,
+    "false_safe_count": 3,
+    "false_alarm_count": 0
+  },
+  "layer_breakdown": {
+    "regex_only": 0,
+    "keyword_only": 0,
+    "regex_and_keyword": 0,
+    "no_hit": 3,
+    "total": 3,
+    "num_layers": 3,
+    "per_layer": {
+      "regex": {
+        "hits": 0,
+        "total_entities_found": 0
+      },
+      "keyword": {
+        "hits": 0,
+        "total_entities_found": 0
+      },
+      "slm": {
+        "hits": 3,
+        "s1_count": 3,
+        "s2_count": 0,
+        "s3_count": 0
+      }
+    },
+    "slm_triggered": 3,
+    "regex_pct": 0.0,
+    "keyword_pct": 0.0,
+    "no_hit_pct": 100.0,
+    "slm_pct": 100.0
+  },
+  "per_sample": [
+    {
+      "sample_id": "001-90194",
+      "text_length": 9923,
+      "gt_entity_count": 100,
+      "pred_entity_count": 0,
+      "detection": {
+        "level": "N/A",
+        "confidence": 0.0,
+        "reason": "SLM judge: SLM judge failed, unable to determine: LLM invocation failed: Connection error."
+      },
+      "entity_metrics": {
+        "per_type": {
+          "PHONE": {
+            "tp": 0,
+            "fp": 0,
+            "fn": 0,
+            "precision": 0.0,
+            "recall": 0.0,
+            "f1": 0.0,
+            "support": 0
+          },
+          "ID_CARD": {
+            "tp": 0,
+            "fp": 0,
+            "fn": 1,
+            "precision": 0.0,
+            "recall": 0.0,
+            "f1": 0.0,
+            "support": 1
+          },
+          "EMAIL": {
+            "tp": 0,
+            "fp": 0,
+            "fn": 0,
+            "precision": 0.0,
+            "recall": 0.0,
+            "f1": 0.0,
+            "support": 0
+          },
+          "BANK_CARD": {
+            "tp": 0,
+            "fp": 0,
+            "fn": 0,
+            "precision": 0.0,
+            "recall": 0.0,
+            "f1": 0.0,
+            "support": 0
+          },
+          "IP_ADDRESS": {
+            "tp": 0,
+            "fp": 0,
+            "fn": 0,
+            "precision": 0.0,
+            "recall": 0.0,
+            "f1": 0.0,
+            "support": 0
+          },
+          "NAME": {
+            "tp": 0,
+            "fp": 0,
+            "fn": 19,
+            "precision": 0.0,
+            "recall": 0.0,
+            "f1": 0.0,
+            "support": 19
+          },
+          "ADDRESS": {
+            "tp": 0,
+            "fp": 0,
+            "fn": 7,
+            "precision": 0.0,
+            "recall": 0.0,
+            "f1": 0.0,
+            "support": 7
+          },
+          "FINANCIAL": {
+            "tp": 0,
+            "fp": 0,
+            "fn": 0,
+            "precision": 0.0,
+            "recall": 0.0,
+            "f1": 0.0,
+            "support": 0
+          },
+          "MEDICAL": {
+            "tp": 0,
+            "fp": 0,
+            "fn": 0,
+            "precision": 0.0,
+            "recall": 0.0,
+            "f1": 0.0,
+            "support": 0
+          },
+          "MISC": {
+            "tp": 0,
+            "fp": 0,
+            "fn": 73,
+            "precision": 0.0,
+            "recall": 0.0,
+            "f1": 0.0,
+            "support": 73
+          }
+        },
+        "overall": {
+          "tp": 0,
+          "fp": 0,
+          "fn": 100,
+          "precision": 0.0,
+          "recall": 0.0,
+          "f1": 0.0
+        },
+        "matched_gt": 0,
+        "total_gt": 100,
+        "total_pred": 0
+      },
+      "span_metrics": {
+        "overall_exact_match": 0.0,
+        "gt_coverage": 0.0
+      },
+      "identifier_type_breakdown": {
+        "DIRECT": {
+          "count": 2,
+          "matched": 0,
+          "recall": 0.0
+        },
+        "QUASI": {
+          "count": 70,
+          "matched": 0,
+          "recall": 0.0
+        },
+        "NO_MASK": {
+          "count": 28,
+          "matched": 0,
+          "recall": 0.0
+        }
+      },
+      "sanitization": {
+        "entities_replaced": 0,
+        "sanitized_length": 9923,
+        "original_length": 9923,
+        "length_change_pct": 0.0,
+        "placeholder_count": 0
+      }
+    },
+    {
+      "sample_id": "001-84741",
+      "text_length": 3398,
+      "gt_entity_count": 33,
+      "pred_entity_count": 0,
+      "detection": {
+        "level": "N/A",
+        "confidence": 0.0,
+        "reason": "SLM judge: SLM judge failed, unable to determine: LLM invocation failed: Connection error."
+      },
+      "entity_metrics": {
+        "per_type": {
+          "PHONE": {
+            "tp": 0,
+            "fp": 0,
+            "fn": 0,
+            "precision": 0.0,
+            "recall": 0.0,
+            "f1": 0.0,
+            "support": 0
+          },
+          "ID_CARD": {
+            "tp": 0,
+            "fp": 0,
+            "fn": 1,
+            "precision": 0.0,
+            "recall": 0.0,
+            "f1": 0.0,
+            "support": 1
+          },
+          "EMAIL": {
+            "tp": 0,
+            "fp": 0,
+            "fn": 0,
+            "precision": 0.0,
+            "recall": 0.0,
+            "f1": 0.0,
+            "support": 0
+          },
+          "BANK_CARD": {
+            "tp": 0,
+            "fp": 0,
+            "fn": 0,
+            "precision": 0.0,
+            "recall": 0.0,
+            "f1": 0.0,
+            "support": 0
+          },
+          "IP_ADDRESS": {
+            "tp": 0,
+            "fp": 0,
+            "fn": 0,
+            "precision": 0.0,
+            "recall": 0.0,
+            "f1": 0.0,
+            "support": 0
+          },
+          "NAME": {
+            "tp": 0,
+            "fp": 0,
+            "fn": 8,
+            "precision": 0.0,
+            "recall": 0.0,
+            "f1": 0.0,
+            "support": 8
+          },
+          "ADDRESS": {
+            "tp": 0,
+            "fp": 0,
+            "fn": 1,
+            "precision": 0.0,
+            "recall": 0.0,
+            "f1": 0.0,
+            "support": 1
+          },
+          "FINANCIAL": {
+            "tp": 0,
+            "fp": 0,
+            "fn": 0,
+            "precision": 0.0,
+            "recall": 0.0,
+            "f1": 0.0,
+            "support": 0
+          },
+          "MEDICAL": {
+            "tp": 0,
+            "fp": 0,
+            "fn": 0,
+            "precision": 0.0,
+            "recall": 0.0,
+            "f1": 0.0,
+            "support": 0
+          },
+          "MISC": {
+            "tp": 0,
+            "fp": 0,
+            "fn": 23,
+            "precision": 0.0,
+            "recall": 0.0,
+            "f1": 0.0,
+            "support": 23
+          }
+        },
+        "overall": {
+          "tp": 0,
+          "fp": 0,
+          "fn": 33,
+          "precision": 0.0,
+          "recall": 0.0,
+          "f1": 0.0
+        },
+        "matched_gt": 0,
+        "total_gt": 33,
+        "total_pred": 0
+      },
+      "span_metrics": {
+        "overall_exact_match": 0.0,
+        "gt_coverage": 0.0
+      },
+      "identifier_type_breakdown": {
+        "DIRECT": {
+          "count": 2,
+          "matched": 0,
+          "recall": 0.0
+        },
+        "QUASI": {
+          "count": 28,
+          "matched": 0,
+          "recall": 0.0
+        },
+        "NO_MASK": {
+          "count": 3,
+          "matched": 0,
+          "recall": 0.0
+        }
+      },
+      "sanitization": {
+        "entities_replaced": 0,
+        "sanitized_length": 3398,
+        "original_length": 3398,
+        "length_change_pct": 0.0,
+        "placeholder_count": 0
+      }
+    },
+    {
+      "sample_id": "001-91042",
+      "text_length": 3350,
+      "gt_entity_count": 29,
+      "pred_entity_count": 0,
+      "detection": {
+        "level": "N/A",
+        "confidence": 0.0,
+        "reason": "SLM judge: SLM judge failed, unable to determine: LLM invocation failed: Connection error."
+      },
+      "entity_metrics": {
+        "per_type": {
+          "PHONE": {
+            "tp": 0,
+            "fp": 0,
+            "fn": 0,
+            "precision": 0.0,
+            "recall": 0.0,
+            "f1": 0.0,
+            "support": 0
+          },
+          "ID_CARD": {
+            "tp": 0,
+            "fp": 0,
+            "fn": 1,
+            "precision": 0.0,
+            "recall": 0.0,
+            "f1": 0.0,
+            "support": 1
+          },
+          "EMAIL": {
+            "tp": 0,
+            "fp": 0,
+            "fn": 0,
+            "precision": 0.0,
+            "recall": 0.0,
+            "f1": 0.0,
+            "support": 0
+          },
+          "BANK_CARD": {
+            "tp": 0,
+            "fp": 0,
+            "fn": 0,
+            "precision": 0.0,
+            "recall": 0.0,
+            "f1": 0.0,
+            "support": 0
+          },
+          "IP_ADDRESS": {
+            "tp": 0,
+            "fp": 0,
+            "fn": 0,
+            "precision": 0.0,
+            "recall": 0.0,
+            "f1": 0.0,
+            "support": 0
+          },
+          "NAME": {
+            "tp": 0,
+            "fp": 0,
+            "fn": 12,
+            "precision": 0.0,
+            "recall": 0.0,
+            "f1": 0.0,
+            "support": 12
+          },
+          "ADDRESS": {
+            "tp": 0,
+            "fp": 0,
+            "fn": 1,
+            "precision": 0.0,
+            "recall": 0.0,
+            "f1": 0.0,
+            "support": 1
+          },
+          "FINANCIAL": {
+            "tp": 0,
+            "fp": 0,
+            "fn": 0,
+            "precision": 0.0,
+            "recall": 0.0,
+            "f1": 0.0,
+            "support": 0
+          },
+          "MEDICAL": {
+            "tp": 0,
+            "fp": 0,
+            "fn": 0,
+            "precision": 0.0,
+            "recall": 0.0,
+            "f1": 0.0,
+            "support": 0
+          },
+          "MISC": {
+            "tp": 0,
+            "fp": 0,
+            "fn": 15,
+            "precision": 0.0,
+            "recall": 0.0,
+            "f1": 0.0,
+            "support": 15
+          }
+        },
+        "overall": {
+          "tp": 0,
+          "fp": 0,
+          "fn": 29,
+          "precision": 0.0,
+          "recall": 0.0,
+          "f1": 0.0
+        },
+        "matched_gt": 0,
+        "total_gt": 29,
+        "total_pred": 0
+      },
+      "span_metrics": {
+        "overall_exact_match": 0.0,
+        "gt_coverage": 0.0
+      },
+      "identifier_type_breakdown": {
+        "DIRECT": {
+          "count": 2,
+          "matched": 0,
+          "recall": 0.0
+        },
+        "QUASI": {
+          "count": 20,
+          "matched": 0,
+          "recall": 0.0
+        },
+        "NO_MASK": {
+          "count": 7,
+          "matched": 0,
+          "recall": 0.0
+        }
+      },
+      "sanitization": {
+        "entities_replaced": 0,
+        "sanitized_length": 3350,
+        "original_length": 3350,
+        "length_change_pct": 0.0,
+        "placeholder_count": 0
+      }
+    }
+  ]
+}
