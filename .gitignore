@@ -43,3 +43,5 @@ Thumbs.db
 
 #local data
 data/*.db
+datasets/
+benchmark/result/
