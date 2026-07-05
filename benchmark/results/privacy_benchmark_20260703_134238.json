@@ -1,0 +1,151 @@
+{
+  "metadata": {
+    "benchmark": "privacy-masking-evaluation",
+    "dataset": "Text Anonymization Benchmark (TAB)",
+    "num_samples": 5,
+    "num_samples_with_entities": 5,
+    "total_gt_entities": 224,
+    "num_layers": 1,
+    "elapsed_seconds": 0.01,
+    "avg_ms_per_sample": 1.11,
+    "timestamp": "2026-07-03T13:42:38.963419+00:00"
+  },
+  "aggregate": {
+    "entity_detection": {
+      "micro_precision": 0.0,
+      "micro_recall": 0.0,
+      "micro_f1": 0.0,
+      "total_gt_entities": 224,
+      "total_pred_entities": 0,
+      "per_type": {
+        "PHONE": {
+          "tp": 0,
+          "fp": 0,
+          "fn": 0,
+          "precision": 0.0,
+          "recall": 0.0,
+          "f1": 0.0,
+          "support": 0
+        },
+        "ID_CARD": {
+          "tp": 0,
+          "fp": 0,
+          "fn": 6,
+          "precision": 0.0,
+          "recall": 0.0,
+          "f1": 0.0,
+          "support": 6
+        },
+        "EMAIL": {
+          "tp": 0,
+          "fp": 0,
+          "fn": 0,
+          "precision": 0.0,
+          "recall": 0.0,
+          "f1": 0.0,
+          "support": 0
+        },
+        "BANK_CARD": {
+          "tp": 0,
+          "fp": 0,
+          "fn": 0,
+          "precision": 0.0,
+          "recall": 0.0,
+          "f1": 0.0,
+          "support": 0
+        },
+        "IP_ADDRESS": {
+          "tp": 0,
+          "fp": 0,
+          "fn": 0,
+          "precision": 0.0,
+          "recall": 0.0,
+          "f1": 0.0,
+          "support": 0
+        },
+        "NAME": {
+          "tp": 0,
+          "fp": 0,
+          "fn": 65,
+          "precision": 0.0,
+          "recall": 0.0,
+          "f1": 0.0,
+          "support": 65
+        },
+        "ADDRESS": {
+          "tp": 0,
+          "fp": 0,
+          "fn": 12,
+          "precision": 0.0,
+          "recall": 0.0,
+          "f1": 0.0,
+          "support": 12
+        },
+        "FINANCIAL": {
+          "tp": 0,
+          "fp": 0,
+          "fn": 0,
+          "precision": 0.0,
+          "recall": 0.0,
+          "f1": 0.0,
+          "support": 0
+        },
+        "MEDICAL": {
+          "tp": 0,
+          "fp": 0,
+          "fn": 0,
+          "precision": 0.0,
+          "recall": 0.0,
+          "f1": 0.0,
+          "support": 0
+        },
+        "MISC": {
+          "tp": 0,
+          "fp": 0,
+          "fn": 141,
+          "precision": 0.0,
+          "recall": 0.0,
+          "f1": 0.0,
+          "support": 141
+        }
+      }
+    },
+    "span_accuracy": {
+      "mean_exact_match": 0.0,
+      "mean_gt_coverage": 0.0
+    },
+    "identifier_type_recall": {
+      "DIRECT": {
+        "count": 14,
+        "matched": 0,
+        "recall": 0.0
+      },
+      "QUASI": {
+        "count": 152,
+        "matched": 0,
+        "recall": 0.0
+      },
+      "NO_MASK": {
+        "count": 58,
+        "matched": 0,
+        "recall": 0.0
+      }
+    },
+    "sanitization": {
+      "avg_entities_replaced_per_sample": 0.0,
+      "avg_length_change_pct": 0.0
+    },
+    "detection_rate_pct": 0.0
+  },
+  "privacy_level_accuracy": {
+    "accuracy": 0.0,
+    "total": 5,
+    "correct": 0,
+    "s1_accuracy": null,
+    "s2plus_recall": 0.0,
+    "false_safe_rate": 1.0,
+    "false_alarm_rate": 0.0,
+    "false_safe_count": 5,
+    "false_alarm_count": 0
+  },
+  "layer_breakdown": 

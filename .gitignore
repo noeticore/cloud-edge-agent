@@ -46,3 +46,7 @@ data/*.db
 
 # Trace output files
 outputs/
+
+# Benchmark datasets and generated results
+datasets/
+benchmark/results/
