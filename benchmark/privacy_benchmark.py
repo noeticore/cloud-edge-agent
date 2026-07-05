@@ -132,9 +132,44 @@ OUR_ENTITY_TYPES = [
 ]
 
 
+_NER_RESULT_CACHE: dict[str, list[SensitiveEntity]] = {}
+
+
+async def _cached_ner_detect(text: str) -> list[SensitiveEntity]:
+    """Reuse NER output between scoring and layer-breakdown passes."""
+    if text not in _NER_RESULT_CACHE:
+        _NER_RESULT_CACHE[text] = await _ner_detect(text)
+    return _NER_RESULT_CACHE[text]
+
+
 # ---------------------------------------------------------------------------
 # Data loading
 # ---------------------------------------------------------------------------
+
+
+def filter_samples_by_identifier(
+    samples: list[dict[str, Any]], identifier_filter: str
+) -> list[dict[str, Any]]:
+    """Filter normalized entities by TAB identifier type."""
+    allowed = {
+        "direct": {"DIRECT"},
+        "direct+quasi": {"DIRECT", "QUASI"},
+    }.get(identifier_filter)
+
+    if allowed is None:
+        return samples
+
+    return [
+        {
+            **sample,
+            "entities": [
+                entity
+                for entity in sample.get("entities", [])
+                if entity.get("identifier_type") in allowed
+            ],
+        }
+        for sample in samples
+    ]
 
 
 def load_dataset_from_file(filepath: Path) -> list[dict[str, Any]]:
@@ -557,7 +592,7 @@ async def analyze_detection_layer_breakdown(
     for sample in samples:
         text = sample["text"]
         regex_entities = _regex_detect(text)
-        ner_entities = await _ner_detect(text)
+        ner_entities = await _cached_ner_detect(text) if num_layers >= 2 else []
 
         has_regex = bool(regex_entities)
         has_ner = bool(ner_entities)
@@ -631,7 +666,7 @@ async def detect_with_layers(
 
     # Layer 2: NER (Presidio)
     if num_layers >= 2:
-        ner_entities = await _ner_detect(text)
+        ner_entities = await _cached_ner_detect(text)
         all_entities.extend(ner_entities)
 
     # Layer 3: SLM judge
@@ -705,6 +740,8 @@ async def run_benchmark(
     Returns:
         dict with all benchmark metrics.
     """
+    _NER_RESULT_CACHE.clear()
+
     slm_client: LLMClient | None = None
     if num_layers >= 3:
         from app.core.config.settings import get_settings
@@ -987,6 +1024,8 @@ def main() -> None:
             annotator=args.annotator,
             identifier_filter=args.identifier_filter,
         )
+
+    samples = filter_samples_by_identifier(samples, args.identifier_filter)
 
     if args.max_samples > 0 and len(samples) > args.max_samples:
         samples = samples[: args.max_samples]

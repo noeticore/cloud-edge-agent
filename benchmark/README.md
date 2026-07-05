@@ -46,7 +46,7 @@ python benchmark/download_tab_dataset.py --format jsonl
 ### 3. 运行评测
 
 ```bash
-# 默认两层检测（Regex + Keywords，100 条样本）
+# 默认两层检测（Regex + Presidio NER，100 条样本）
 python benchmark/privacy_benchmark.py --max-samples 100
 
 #  Regex + ner（Layer 2）
