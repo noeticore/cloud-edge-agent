@@ -61,7 +61,7 @@ class LLMReranker(Reranker):
 
         logger.info(
             "reranker_done",
-            query=query[:80],
+            query=query,
             input_count=len(results),
             output_count=len(reranked),
         )

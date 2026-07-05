@@ -432,7 +432,7 @@ class ReActAgent(BaseAgent):
             "total_tokens": 0,
         }
 
-        logger.info("langgraph_agent_start", query=query[:80])
+        logger.info("langgraph_agent_start", query=query)
 
         # Run the graph
         final_state = await self._graph.ainvoke(initial_state)

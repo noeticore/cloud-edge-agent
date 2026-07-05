@@ -302,6 +302,8 @@ async def create_components() -> AppComponents:
         session_store=session_store,
         conversation_store=conversation_store,
         rag_pipeline=rag_pipeline,
+        trace_enabled=settings.trace.enabled,
+        trace_output_dir=settings.trace.output_dir,
     )
 
     return AppComponents(

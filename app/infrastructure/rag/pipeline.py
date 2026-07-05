@@ -122,7 +122,7 @@ class RAGPipeline:
         candidates = await self._retriever.retrieve(query, top_k=top_k)
         logger.info(
             "rag_retrieve_candidates",
-            query=query[:80],
+            query=query,
             candidate_count=len(candidates),
         )
 
@@ -136,7 +136,7 @@ class RAGPipeline:
 
         logger.info(
             "rag_retrieve_complete",
-            query=query[:80],
+            query=query,
             result_count=len(results),
         )
         return results

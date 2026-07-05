@@ -43,3 +43,6 @@ Thumbs.db
 
 #local data
 data/*.db
+
+# Trace output files
+outputs/
