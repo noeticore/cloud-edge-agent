@@ -535,8 +535,13 @@ async def analyze_detection_layer_breakdown(
     samples: list[dict[str, Any]],
     num_layers: int = 2,
     slm_client: LLMClient | None = None,
+    records: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
-    """Analyze which detection layers fire and their hit rates."""
+    """Analyze which detection layers fire and their hit rates.
+
+    Regex and NER are re-run here (cheap). SLM stats are extracted from
+    already-computed records to avoid double LLM calls.
+    """
     results: dict[str, Any] = {
         "regex_only": 0,
         "ner_only": 0,
@@ -552,9 +557,8 @@ async def analyze_detection_layer_breakdown(
 
     if num_layers >= 3:
         results["per_layer"]["slm"] = {"hits": 0, "s1_count": 0, "s2_count": 0, "s3_count": 0}
-        results["slm_triggered"] = 0  # SLM only fires when regex+NER both miss
 
-    for sample in samples:
+    for idx, sample in enumerate(samples):
         text = sample["text"]
         regex_entities = _regex_detect(text)
         ner_entities = await _ner_detect(text)
@@ -576,17 +580,17 @@ async def analyze_detection_layer_breakdown(
         results["per_layer"]["ner"]["hits"] += 1 if has_ner else 0
         results["per_layer"]["ner"]["total_entities_found"] += len(ner_entities)
 
-        # SLM layer: only triggered when regex+NER both miss
-        if num_layers >= 3 and not has_regex and not has_ner and slm_client is not None:
-            results["slm_triggered"] += 1
-            slm_result = await _slm_judge(text, slm_client)
-            results["per_layer"]["slm"]["hits"] += 1
-            if slm_result.level == PrivacyLevel.S2:
-                results["per_layer"]["slm"]["s2_count"] += 1
-            elif slm_result.level == PrivacyLevel.S3:
-                results["per_layer"]["slm"]["s3_count"] += 1
-            else:
-                results["per_layer"]["slm"]["s1_count"] += 1
+        # SLM: extract from already-computed records (no double LLM call)
+        if num_layers >= 3 and records is not None and idx < len(records):
+            slm_info = records[idx].get("slm_verdict")
+            if slm_info:
+                results["per_layer"]["slm"]["hits"] += 1
+                if slm_info["level"] == "S2":
+                    results["per_layer"]["slm"]["s2_count"] += 1
+                elif slm_info["level"] == "S3":
+                    results["per_layer"]["slm"]["s3_count"] += 1
+                else:
+                    results["per_layer"]["slm"]["s1_count"] += 1
 
     total = max(len(samples), 1)
     results["regex_pct"] = round(100 * results["per_layer"]["regex"]["hits"] / total, 1)
@@ -594,7 +598,7 @@ async def analyze_detection_layer_breakdown(
     results["no_hit_pct"] = round(100 * results["no_hit"] / total, 1)
 
     if num_layers >= 3 and "slm" in results["per_layer"]:
-        results["slm_pct"] = round(100 * results["slm_triggered"] / total, 1)
+        results["slm_pct"] = round(100 * results["per_layer"]["slm"]["hits"] / total, 1)
 
     return results
 
@@ -635,6 +639,7 @@ async def detect_with_layers(
         all_entities.extend(ner_entities)
 
     # Layer 3: SLM judge
+    slm_verdict: dict[str, Any] | None = None
     slm_level: PrivacyLevel | None = None
     slm_confidence: float = 0.0
     slm_reason: str = ""
@@ -644,6 +649,11 @@ async def detect_with_layers(
         slm_level = slm_result.level
         slm_confidence = slm_result.confidence
         slm_reason = slm_result.reason
+        slm_verdict = {
+            "level": slm_level.value,
+            "confidence": round(slm_confidence, 4),
+            "reason": slm_reason,
+        }
 
     # Deduplicate entities by position (keep first occurrence)
     seen: set[tuple[int, int]] = set()
@@ -684,7 +694,7 @@ async def detect_with_layers(
         confidence=confidence,
         entities=deduped,
         reason=reason,
-    )
+    ), slm_verdict
 
 
 # ---------------------------------------------------------------------------
@@ -708,11 +718,20 @@ async def run_benchmark(
     slm_client: LLMClient | None = None
     if num_layers >= 3:
         from app.core.config.settings import get_settings
-        from app.infrastructure.llm.client_factory import create_edge_llm_client
+        from app.infrastructure.llm.openai_compatible_client import OpenAICompatibleClient
 
         settings = get_settings()
-        slm_client = create_edge_llm_client(settings.edge_llm)
-        print("SLM judge enabled (edge model)")
+        slm_model = settings.privacy.slm_model
+        edge_settings = settings.edge_llm
+        slm_client = OpenAICompatibleClient(
+            provider=edge_settings.provider,
+            model_name=slm_model,
+            base_url=edge_settings.base_url,
+            api_key=edge_settings.api_key,
+            temperature=0.0,
+            max_tokens=256,
+        )
+        print(f"SLM judge enabled: model={slm_model}")
 
     records: list[dict[str, Any]] = []
     start_time = time.perf_counter()
@@ -722,7 +741,7 @@ async def run_benchmark(
         gt_entities: list[dict[str, Any]] = sample.get("entities", [])
 
         # Run privacy detection with the specified layers
-        detection = await detect_with_layers(text, num_layers, slm_client)
+        detection, slm_verdict = await detect_with_layers(text, num_layers, slm_client)
         pred_entities = detection.entities
 
         # Compute metrics
@@ -741,6 +760,7 @@ async def run_benchmark(
                 "confidence": round(detection.confidence, 4),
                 "reason": detection.reason,
             },
+            "slm_verdict": slm_verdict,
             "entity_metrics": entity_metrics,
             "span_metrics": span_metrics,
             "identifier_type_breakdown": id_type_breakdown,
@@ -755,7 +775,7 @@ async def run_benchmark(
     aggregate = _aggregate_metrics(records)
     privacy_level_metrics = evaluate_privacy_level_accuracy(records)
     layer_breakdown = await analyze_detection_layer_breakdown(
-        samples, num_layers, slm_client
+        samples, num_layers, slm_client, records
     )
 
     return {

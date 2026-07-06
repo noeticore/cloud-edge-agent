@@ -1,0 +1,161 @@
+{
+  "metadata": {
+    "benchmark": "privacy-masking-evaluation",
+    "dataset": "Text Anonymization Benchmark (TAB)",
+    "num_samples": 1000,
+    "num_samples_with_entities": 1000,
+    "total_gt_entities": 85441,
+    "num_layers": 3,
+    "elapsed_seconds": 2509.36,
+    "avg_ms_per_sample": 2509.36,
+    "timestamp": "2026-07-06T12:23:05.564539+00:00"
+  },
+  "aggregate": {
+    "entity_detection": {
+      "micro_precision": 0.8563,
+      "micro_recall": 0.5747,
+      "micro_f1": 0.6878,
+      "total_gt_entities": 85441,
+      "total_pred_entities": 57347,
+      "per_type": {
+        "CODE": {
+          "tp": 36,
+          "fp": 59,
+          "fn": 2068,
+          "precision": 0.3789,
+          "recall": 0.0171,
+          "f1": 0.0327,
+          "support": 2104
+        },
+        "PERSON": {
+          "tp": 10772,
+          "fp": 2608,
+          "fn": 2615,
+          "precision": 0.8051,
+          "recall": 0.8047,
+          "f1": 0.8049,
+          "support": 13387
+        },
+        "LOC": {
+          "tp": 4096,
+          "fp": 1529,
+          "fn": 1170,
+          "precision": 0.7282,
+          "recall": 0.7778,
+          "f1": 0.7522,
+          "support": 5266
+        },
+        "ORG": {
+          "tp": 2353,
+          "fp": 0,
+          "fn": 21843,
+          "precision": 1.0,
+          "recall": 0.0972,
+          "f1": 0.1773,
+          "support": 24196
+        },
+        "DATETIME": {
+          "tp": 29683,
+          "fp": 3432,
+          "fn": 349,
+          "precision": 0.8964,
+          "recall": 0.9884,
+          "f1": 0.9401,
+          "support": 30032
+        },
+        "DEM": {
+          "tp": 2039,
+          "fp": 571,
+          "fn": 2466,
+          "precision": 0.7812,
+          "recall": 0.4526,
+          "f1": 0.5732,
+          "support": 4505
+        },
+        "MISC": {
+          "tp": 124,
+          "fp": 43,
+          "fn": 3548,
+          "precision": 0.7425,
+          "recall": 0.0338,
+          "f1": 0.0646,
+          "support": 3672
+        },
+        "QUANTITY": {
+          "tp": 0,
+          "fp": 0,
+          "fn": 2279,
+          "precision": 0.0,
+          "recall": 0.0,
+          "f1": 0.0,
+          "support": 2279
+        }
+      }
+    },
+    "span_accuracy": {
+      "mean_exact_match": 0.6966,
+      "mean_gt_coverage": 0.4719
+    },
+    "identifier_type_recall": {
+      "DIRECT": {
+        "count": 3319,
+        "matched": 1997,
+        "recall": 0.6017
+      },
+      "QUASI": {
+        "count": 54303,
+        "matched": 37961,
+        "recall": 0.6991
+      },
+      "NO_MASK": {
+        "count": 27819,
+        "matched": 9397,
+        "recall": 0.3378
+      }
+    },
+    "sanitization": {
+      "avg_entities_replaced_per_sample": 57.35,
+      "avg_length_change_pct": 10.91
+    },
+    "detection_rate_pct": 100.0
+  },
+  "privacy_level_accuracy": {
+    "accuracy": 1.0,
+    "total": 1000,
+    "correct": 1000,
+    "s1_accuracy": null,
+    "s2plus_recall": 1.0,
+    "false_safe_rate": 0.0,
+    "false_alarm_rate": 0.0,
+    "false_safe_count": 0,
+    "false_alarm_count": 0
+  },
+  "layer_breakdown": {
+    "regex_only": 0,
+    "ner_only": 999,
+    "regex_and_ner": 1,
+    "no_hit": 0,
+    "total": 1000,
+    "num_layers": 3,
+    "per_layer": {
+      "regex": {
+        "hits": 1,
+        "total_entities_found": 1
+      },
+      "ner": {
+        "hits": 1000,
+        "total_entities_found": 57368
+      },
+      "slm": {
+        "hits": 1000,
+        "s1_count": 418,
+        "s2_count": 36,
+        "s3_count": 546
+      }
+    },
+    "regex_pct": 0.1,
+    "ner_pct": 100.0,
+    "no_hit_pct": 0.0,
+    "slm_pct": 100.0
+  },
+}

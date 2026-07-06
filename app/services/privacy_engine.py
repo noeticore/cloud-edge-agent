@@ -110,14 +110,32 @@ Text to analyze:
 
 async def _slm_judge(text: str, slm_client: LLMClient) -> PrivacyDetection:
     """Layer 3: Use a small local LLM to judge privacy level."""
+    import json
+    import re
+
     messages = [
         LLMMessage(role="user", content=_SLM_JUDGE_PROMPT.format(text=text))
     ]
     try:
         response = await slm_client.invoke(messages)
-        import json
+        raw = response.content.strip()
 
-        parsed = json.loads(response.content.strip())
+        # Small models (1.5B) often wrap JSON in markdown or extra text.
+        # Try direct parse first, then fall back to regex extraction.
+        parsed: dict | None = None
+        try:
+            parsed = json.loads(raw)
+        except json.JSONDecodeError:
+            match = re.search(r'\{[^{}]*"level"\s*:\s*"[^"]*"[^{}]*\}', raw)
+            if match:
+                try:
+                    parsed = json.loads(match.group())
+                except json.JSONDecodeError:
+                    pass
+
+        if parsed is None:
+            raise ValueError(f"no valid JSON in SLM response: {raw[:200]}")
+
         level = PrivacyLevel(parsed.get("level", "NA"))
         confidence = float(parsed.get("confidence", 0.5))
         reason = parsed.get("reason", "")
@@ -129,7 +147,7 @@ async def _slm_judge(text: str, slm_client: LLMClient) -> PrivacyDetection:
         return PrivacyDetection(
             level=PrivacyLevel.NA,
             confidence=0.0,
-            reason=f"SLM judge failed, unable to determine: {exc}",
+            reason=f"SLM judge failed: {exc}",
         )
 
 
