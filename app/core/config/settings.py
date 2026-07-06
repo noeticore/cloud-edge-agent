@@ -75,6 +75,17 @@ class VectorStoreSettings(BaseSettings):
     timeout: int = Field(default=30, description="Connection timeout in seconds")
 
 
+class TraceSettings(BaseSettings):
+    """Trace collection configuration."""
+
+    model_config = {"env_prefix": "TRACE_", "env_file": ".env", "extra": "ignore"}
+
+    enabled: bool = Field(default=True, description="Enable per-request trace collection")
+    output_dir: str = Field(
+        default="outputs/traces", description="Directory for trace JSON files"
+    )
+
+
 class Settings(BaseSettings):
     """Root application settings."""
 
@@ -90,6 +101,7 @@ class Settings(BaseSettings):
     cloud_llm: CloudLLMSettings = Field(default_factory=CloudLLMSettings)
     privacy: PrivacySettings = Field(default_factory=PrivacySettings)
     vector_store: VectorStoreSettings = Field(default_factory=VectorStoreSettings)
+    trace: TraceSettings = Field(default_factory=TraceSettings)
 
 
 def get_settings() -> Settings:

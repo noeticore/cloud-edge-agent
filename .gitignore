@@ -43,5 +43,10 @@ Thumbs.db
 
 #local data
 data/*.db
+
+# Trace output files
+outputs/
+
+# Benchmark datasets and generated results
 datasets/
-benchmark/result/
+benchmark/results/

@@ -41,7 +41,7 @@ class MemoryRetriever(Retriever):
 
         logger.info(
             "retriever_search",
-            query=query[:80],
+            query=query,
             results=len(results),
         )
         return results

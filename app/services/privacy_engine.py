@@ -6,6 +6,7 @@ interfaces defined in domain/privacy.
 
 import re
 import uuid
+from typing import Any
 
 from app.core.logger.logger import get_logger
 from app.domain.llm.llm_client import LLMClient, LLMMessage
@@ -21,6 +22,11 @@ from app.domain.privacy.privacy import (
 )
 
 logger = get_logger(__name__)
+
+# Presidio model loading is expensive. Keep one analyzer per process instead of
+# rebuilding the NLP pipeline for every text (especially important for
+# benchmarks and batch ingestion).
+_presidio_analyzer: Any | None = None
 
 # ---------------------------------------------------------------------------
 # Layer 1 — Regex patterns for common PII
@@ -72,7 +78,10 @@ async def _ner_detect(text: str) -> list[SensitiveEntity]:
     try:
         from presidio_analyzer import AnalyzerEngine
 
-        analyzer = AnalyzerEngine()
+        global _presidio_analyzer
+        if _presidio_analyzer is None:
+            _presidio_analyzer = AnalyzerEngine()
+        analyzer = _presidio_analyzer
         results = analyzer.analyze(text=text, language="en")
         return [
             SensitiveEntity(

@@ -17,9 +17,12 @@ import asyncio
 import json
 import time
 from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
+from typing import Any
 
 from app.core.logger.logger import get_logger
+from app.core.trace.collector import save_trace, trace_context
 from app.domain.memory.memory import ConversationEntry, ConversationStore
 from app.infrastructure.database.session_repository import InMemorySessionStore
 from app.infrastructure.rag.pipeline import RAGPipeline
@@ -59,11 +62,15 @@ class ChatService:
         session_store: InMemorySessionStore,
         conversation_store: ConversationStore,
         rag_pipeline: RAGPipeline | None = None,
+        trace_enabled: bool = False,
+        trace_output_dir: str = "outputs/traces",
     ) -> None:
         self._orchestrator = orchestrator
         self._sessions = session_store
         self._conversations = conversation_store
         self._rag = rag_pipeline
+        self._trace_enabled = trace_enabled
+        self._trace_output_dir = trace_output_dir
 
     async def chat(
         self, query: str, session_id: str | None = None
@@ -84,78 +91,22 @@ class ChatService:
         if self._sessions.get(session_id) is None:
             self._sessions.create(session_id)
 
-        # Retrieve conversation context for the orchestrator
-        # The orchestrator will decide which content type to use based on mode
-        context_messages = await self._conversations.get_context_messages(
-            session_id=session_id,
-            limit=_MAX_CONTEXT_MESSAGES,
-            content_type="original",  # Default to original; orchestrator handles mode
-        )
-
-        # Retrieve context from two sources:
-        # 1. RAG — vector similarity search on Qdrant (external knowledge)
-        # 2. Local conversation history — keyword search on SQLite (cross-session)
-        rag_context = ""
-        if self._rag is not None:
-            try:
-                rag_results = await self._rag.retrieve(query, top_k=3)
-                if rag_results:
-                    rag_context = "\n".join(
-                        f"- {r.document.content[:200]}" for r in rag_results
-                    )
-            except Exception as exc:
-                logger.warning("rag_retrieval_failed", error=str(exc))
-
-        # Also search local conversation store for relevant history.
-        # Two strategies combined:
-        #   1. Keyword search — finds semantically related past conversations
-        #   2. Recent history — pulls the latest entries across all sessions,
-        #      so the agent always has access to recently shared info
-        local_context = ""
-        try:
-            local_results = await self._conversations.search(
-                query=query, session_id=None, top_k=3
-            )
-            # Also grab recent entries across all sessions
-            recent_entries = await self._conversations.get_recent(
-                limit=10, content_type="original"
+        # Wrap processing in trace context if enabled
+        async with trace_context(session_id, query) if self._trace_enabled else self._noop_trace() as collector:
+            result, context_messages = await self._process_query(
+                query, session_id, collector
             )
 
-            # Merge and deduplicate by entry_id
-            seen: set[str] = set()
-            merged: list = []
-            for entry in local_results + recent_entries:
-                if entry.entry_id not in seen:
-                    seen.add(entry.entry_id)
-                    merged.append(entry)
-
-            if merged:
-                local_context = "\n".join(
-                    f"- [{e.role}] {e.original_content[:200]}"
-                    for e in merged[:5]
-                )
-                logger.info(
-                    "local_conversation_context",
-                    query=query[:50],
-                    keyword_hits=len(local_results),
-                    recent_entries=len(recent_entries),
-                    merged=len(merged),
-                )
-        except Exception as exc:
-            logger.warning("local_conversation_search_failed", error=str(exc))
-
-        # Build enriched query
-        enriched_query = self._enrich_query(
-            query, context_messages, rag_context, local_context
-        )
-
-        # Run orchestrator
-        result: OrchestratorResult = await self._orchestrator.process(
-            query=enriched_query,
-            session_id=session_id,
-            context_messages=context_messages,
-            raw_query=query,
-        )
+            # Enrich trace with orchestrator result
+            if collector is not None:
+                collector.set_metadata("mode", result.mode.value)
+                collector.set_metadata("privacy_level", result.routing.privacy_level.value)
+                collector.set_metadata("complexity", result.routing.complexity.value)
+                collector.set_metadata("answer", result.answer)
+                if result.agent_result and result.agent_result.steps:
+                    collector.set_metadata("agent_steps", len(result.agent_result.steps))
+                    collector.set_metadata("total_tokens", result.agent_result.total_tokens)
+                save_trace(collector, self._trace_output_dir)
 
         # Determine privacy and storage details
         privacy_level = result.routing.privacy_level.value
@@ -211,6 +162,88 @@ class ChatService:
             latency_ms=result.latency_ms,
         )
 
+    async def _process_query(
+        self, query: str, session_id: str, collector: Any = None
+    ) -> tuple[OrchestratorResult, list[dict[str, str]]]:
+        """Core processing logic shared by chat and chat_stream.
+
+        Returns:
+            (orchestrator_result, context_messages)
+        """
+        # Retrieve conversation context
+        context_messages = await self._conversations.get_context_messages(
+            session_id=session_id,
+            limit=_MAX_CONTEXT_MESSAGES,
+            content_type="original",
+        )
+
+        # RAG retrieval
+        rag_context = ""
+        if self._rag is not None:
+            try:
+                rag_results = await self._rag.retrieve(query, top_k=3)
+                if rag_results:
+                    rag_context = "\n".join(
+                        f"- {r.document.content[:200]}" for r in rag_results
+                    )
+            except Exception as exc:
+                logger.warning("rag_retrieval_failed", error=str(exc))
+
+        # Local conversation search
+        local_context = ""
+        try:
+            local_results = await self._conversations.search(
+                query=query, session_id=None, top_k=3
+            )
+            recent_entries = await self._conversations.get_recent(
+                limit=10, content_type="original"
+            )
+
+            seen: set[str] = set()
+            merged: list = []
+            for entry in local_results + recent_entries:
+                if entry.entry_id not in seen:
+                    seen.add(entry.entry_id)
+                    merged.append(entry)
+
+            if merged:
+                local_context = "\n".join(
+                    f"- [{e.role}] {e.original_content[:200]}"
+                    for e in merged[:5]
+                )
+                logger.info(
+                    "local_conversation_context",
+                    query=query,
+                    keyword_hits=len(local_results),
+                    recent_entries=len(recent_entries),
+                    merged=len(merged),
+                )
+        except Exception as exc:
+            logger.warning("local_conversation_search_failed", error=str(exc))
+
+        # Build enriched query
+        enriched_query = self._enrich_query(
+            query, context_messages, rag_context, local_context
+        )
+
+        # Run orchestrator
+        result: OrchestratorResult = await self._orchestrator.process(
+            query=enriched_query,
+            session_id=session_id,
+            context_messages=context_messages,
+            raw_query=query,
+        )
+
+        return result, context_messages
+
+    @staticmethod
+    def _noop_trace():
+        """No-op context manager when tracing is disabled."""
+        @asynccontextmanager
+        async def _noop():
+            yield None
+        return _noop()
+
     async def chat_stream(
         self, query: str, session_id: str | None = None
     ) -> AsyncIterator[str]:
@@ -226,45 +259,21 @@ class ChatService:
         if self._sessions.get(session_id) is None:
             self._sessions.create(session_id)
 
-        # Retrieve context
-        context_messages = await self._conversations.get_context_messages(
-            session_id=session_id,
-            limit=_MAX_CONTEXT_MESSAGES,
-            content_type="original",
-        )
-
-        # Search local conversation store for cross-session context
-        local_context = ""
-        try:
-            local_results = await self._conversations.search(
-                query=query, session_id=None, top_k=3
+        # Wrap in trace context if enabled
+        async with trace_context(session_id, query) if self._trace_enabled else self._noop_trace() as collector:
+            result, context_messages = await self._process_query(
+                query, session_id, collector
             )
-            recent_entries = await self._conversations.get_recent(
-                limit=10, content_type="original"
-            )
-            seen: set[str] = set()
-            merged: list = []
-            for entry in local_results + recent_entries:
-                if entry.entry_id not in seen:
-                    seen.add(entry.entry_id)
-                    merged.append(entry)
-            if merged:
-                local_context = "\n".join(
-                    f"- [{e.role}] {e.original_content[:200]}"
-                    for e in merged[:5]
-                )
-        except Exception as exc:
-            logger.warning("local_conversation_search_failed", error=str(exc))
 
-        enriched_query = self._enrich_query(query, context_messages, "", local_context)
-
-        # Run orchestrator
-        result: OrchestratorResult = await self._orchestrator.process(
-            query=enriched_query,
-            session_id=session_id,
-            context_messages=context_messages,
-            raw_query=query,
-        )
+            # Enrich trace
+            if collector is not None:
+                collector.set_metadata("mode", result.mode.value)
+                collector.set_metadata("privacy_level", result.routing.privacy_level.value)
+                collector.set_metadata("complexity", result.routing.complexity.value)
+                if result.agent_result and result.agent_result.steps:
+                    collector.set_metadata("agent_steps", len(result.agent_result.steps))
+                    collector.set_metadata("total_tokens", result.agent_result.total_tokens)
+                save_trace(collector, self._trace_output_dir)
 
         # Store conversation
         privacy_level = result.routing.privacy_level.value

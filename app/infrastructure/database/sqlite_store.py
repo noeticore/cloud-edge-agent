@@ -161,7 +161,7 @@ class SQLiteMemoryStore(MemoryStore):
 
         logger.info(
             "sqlite_search",
-            query=query[:50],
+            query=query,
             keywords_count=len(keywords),
             results=len(rows),
         )

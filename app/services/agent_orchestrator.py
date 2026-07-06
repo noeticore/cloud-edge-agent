@@ -18,7 +18,7 @@ import time
 from dataclasses import dataclass, field
 
 from app.core.logger.logger import get_logger
-from app.domain.agent.agent import BaseAgent
+from app.domain.agent.agent import AgentResult, BaseAgent
 from app.domain.llm.llm_client import LLMClient, LLMMessage
 from app.domain.privacy.policy import (
     CollaborateMode,
@@ -92,6 +92,7 @@ class OrchestratorResult:
     tokens_used: int = 0
     sanitized_query: str = ""
     restore_mapping: dict[str, str] = field(default_factory=dict)
+    agent_result: AgentResult | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -194,7 +195,7 @@ class CollaborativeOrchestrator:
             )
 
         # Step 5: Execute mode
-        answer, sanitized_query, mapping = await self._execute_mode(
+        answer, sanitized_query, mapping, agent_res = await self._execute_mode(
             mode=routing.mode,
             query=query,
             privacy_result=privacy_result,
@@ -212,6 +213,7 @@ class CollaborativeOrchestrator:
             latency_ms=round(elapsed_ms, 1),
             sanitized_query=sanitized_query,
             restore_mapping=mapping,
+            agent_result=agent_res,
         )
 
     def _requires_local(
@@ -234,55 +236,55 @@ class CollaborativeOrchestrator:
         privacy_result: PrivacyDetection,
         session_id: str,
         context_messages: list[dict[str, str]] | None = None,
-    ) -> tuple[str, str, dict[str, str]]:
+    ) -> tuple[str, str, dict[str, str], AgentResult | None]:
         """Dispatch to the appropriate collaborate mode.
 
         Returns:
-            (answer, sanitized_query, restore_mapping)
+            (answer, sanitized_query, restore_mapping, agent_result)
         """
         if mode == CollaborateMode.DIRECT_LOCAL:
-            answer = await self._mode_direct_local(query, context_messages)
-            return answer, query, {}
+            answer, agent_res = await self._mode_direct_local(query, context_messages)
+            return answer, query, {}, agent_res
 
         elif mode == CollaborateMode.DIRECT_CLOUD:
-            answer = await self._mode_direct_cloud(query, context_messages)
-            return answer, query, {}
+            answer, agent_res = await self._mode_direct_cloud(query, context_messages)
+            return answer, query, {}, agent_res
 
         elif mode == CollaborateMode.SANITIZE_CLOUD:
             answer, sanitized, mapping = await self._mode_sanitize_cloud(
                 query, privacy_result, session_id, context_messages
             )
-            return answer, sanitized, mapping
+            return answer, sanitized, mapping, None
 
         elif mode == CollaborateMode.SKETCH_REFINE:
             answer, sanitized, mapping = await self._mode_sketch_refine(
                 query, privacy_result, session_id
             )
-            return answer, sanitized, mapping
+            return answer, sanitized, mapping, None
 
         else:
-            answer = await self._mode_direct_local(query, context_messages)
-            return answer, query, {}
+            answer, agent_res = await self._mode_direct_local(query, context_messages)
+            return answer, query, {}, agent_res
 
     # --- Mode A: Direct Local ---
     async def _mode_direct_local(
         self,
         query: str,
         context_messages: list[dict[str, str]] | None = None,
-    ) -> str:
+    ) -> tuple[str, AgentResult]:
         """Local execution via edge agent — supports tool calls."""
         result = await self._edge_agent.run(query)
-        return result.answer
+        return result.answer, result
 
     # --- Mode B: Direct Cloud ---
     async def _mode_direct_cloud(
         self,
         query: str,
         context_messages: list[dict[str, str]] | None = None,
-    ) -> str:
+    ) -> tuple[str, AgentResult]:
         """Cloud execution via cloud agent — supports tool calls."""
         result = await self._cloud_agent.run(query)
-        return result.answer
+        return result.answer, result
 
     # --- Mode C: Sanitize → Cloud → Restore ---
     async def _mode_sanitize_cloud(
